@@ -1,0 +1,686 @@
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pywt
+import plotly.express as px
+import streamlit as st
+
+from scipy.ndimage import uniform_filter
+from sklearn.cluster import KMeans
+from sklearn.decomposition import NMF
+from sklearn.manifold import MDS
+from sklearn.metrics import silhouette_score
+from sklearn.preprocessing import StandardScaler
+
+
+warnings.filterwarnings("ignore")
+
+
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
+
+st.set_page_config(
+    page_title="Wavelet Archetype Lab",
+    layout="wide"
+)
+
+st.title("Wavelet Archetype Lab")
+st.caption("Coherencia wavelet + arquetipos dinámicos + clustering K-Means")
+
+
+# ============================================================
+# UTILIDADES TEMPORALES
+# ============================================================
+
+def to_month_index(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convierte cualquier índice de fechas a inicio de mes.
+    Evita el problema de mezclar fin de mes con inicio de mes.
+    """
+    df = df.copy()
+    df.index = pd.to_datetime(df.index, errors="coerce")
+    df = df[~df.index.isna()]
+    df.index = df.index.to_period("M").to_timestamp()
+    return df.sort_index()
+
+
+# ============================================================
+# LECTURA DE EXCELS
+# ============================================================
+
+def find_header_row_excel(path, sheet_name=0, keywords=("Exchange Date", "Date")):
+    raw = pd.read_excel(path, sheet_name=sheet_name, header=None)
+
+    for i in range(min(len(raw), 100)):
+        row_values = raw.iloc[i].astype(str).tolist()
+        if any(k in row_values for k in keywords):
+            return i
+
+    return 0
+
+
+def read_market_index_excel(path, label, sheet_name=0):
+    """
+    Lee índices verdes:
+    - CSI_New_Energy_index.xlsx
+    - ISE_Clean_Edge_Global_Wind_Energy_index.xlsx
+    - S&P_Global_Clean_energy_index.xlsx
+    - WilderHill.xlsx
+
+    Usa:
+    - Exchange Date
+    - Close
+    """
+    header_row = find_header_row_excel(
+        path,
+        sheet_name=sheet_name,
+        keywords=("Exchange Date",)
+    )
+
+    df = pd.read_excel(path, sheet_name=sheet_name, header=header_row)
+
+    if "Exchange Date" not in df.columns:
+        raise ValueError(f"No encuentro 'Exchange Date' en {path}")
+
+    price_col = "Close" if "Close" in df.columns else df.columns[1]
+
+    out = df[["Exchange Date", price_col]].copy()
+    out.columns = ["Date", label]
+
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out[label] = pd.to_numeric(out[label], errors="coerce")
+
+    out = out.dropna().sort_values("Date").set_index("Date")
+
+    monthly = out.resample("ME").last().dropna()
+    monthly = to_month_index(monthly)
+
+    returns = np.log(monthly / monthly.shift(1)).dropna()
+    returns = to_month_index(returns)
+
+    return returns
+
+
+def read_hui_sheet(path, sheet_name, label):
+    """
+    Lee hojas concretas de DATA revisados Hui.xlsx:
+    - SUNIDX
+    - MVIS GLO URAN PR
+    - FTSE ENV OPPORT ENE EFF
+    - ERIXP USD
+    """
+    df = pd.read_excel(path, sheet_name=sheet_name, header=0)
+
+    date_col = df.columns[0]
+    price_col = df.columns[1]
+
+    out = df[[date_col, price_col]].copy()
+    out.columns = ["Date", label]
+
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out[label] = pd.to_numeric(out[label], errors="coerce")
+
+    out = out.dropna().sort_values("Date").set_index("Date")
+
+    monthly = out.resample("ME").last().dropna()
+    monthly = to_month_index(monthly)
+
+    returns = np.log(monthly / monthly.shift(1)).dropna()
+    returns = to_month_index(returns)
+
+    return returns
+
+
+def read_eurostat_bonds(path, sheet_name="Bond_2001", drop_cols=("JP", "US", "TR")):
+    """
+    Lee eurostat_bonos10.xlsx.
+
+    Mantiene tu lógica de R:
+        gross = 1 + yield / 100
+        returns = diff(log(gross))
+    """
+    df = pd.read_excel(path, sheet_name=sheet_name)
+
+    if "Time" not in df.columns:
+        raise ValueError(f"No encuentro la columna 'Time' en {path}")
+
+    df["Time"] = pd.to_datetime(df["Time"].astype(str), errors="coerce")
+    df = df.dropna(subset=["Time"]).set_index("Time")
+
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+    df = to_month_index(df)
+
+    gross = 1 + df / 100.0
+
+    returns = np.log(gross / gross.shift(1))
+    returns = returns.replace([np.inf, -np.inf], np.nan)
+    returns = returns.dropna(how="all")
+    returns = returns.dropna(axis=1, how="any")
+    returns = to_month_index(returns)
+
+    return returns
+
+
+@st.cache_data
+def build_dataset(data_dir: str, bond_sheet: str):
+    data_dir = Path(data_dir)
+
+    files = {
+        "CSI_China": data_dir / "CSI_New_Energy_index.xlsx",
+        "Wind": data_dir / "ISE_Clean_Edge_Global_Wind_Energy_index.xlsx",
+        "SP_Clean": data_dir / "S&P_Global_Clean_energy_index.xlsx",
+        "WilderHill": data_dir / "WilderHill.xlsx",
+        "Hui": data_dir / "DATA revisados Hui.xlsx",
+        "Bonds": data_dir / "eurostat_bonos10.xlsx",
+    }
+
+    missing = [str(v) for v in files.values() if not v.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Faltan estos archivos en la carpeta indicada:\n" + "\n".join(missing)
+        )
+
+    series = []
+
+    series.append(read_market_index_excel(files["CSI_China"], "CSI_China"))
+    series.append(read_market_index_excel(files["Wind"], "Wind"))
+    series.append(read_market_index_excel(files["SP_Clean"], "SP_Clean"))
+    series.append(read_market_index_excel(files["WilderHill"], "WilderHill"))
+
+    series.append(read_hui_sheet(files["Hui"], "SUNIDX", "Solar"))
+    series.append(read_hui_sheet(files["Hui"], "MVIS GLO URAN PR", "Uranium"))
+    series.append(read_hui_sheet(files["Hui"], "FTSE ENV OPPORT ENE EFF", "FTSE_Env"))
+    series.append(read_hui_sheet(files["Hui"], "ERIXP USD", "ERIXP_EU"))
+
+    bonds = read_eurostat_bonds(files["Bonds"], sheet_name=bond_sheet)
+    series.append(bonds)
+
+    dataset = pd.concat(series, axis=1, join="inner")
+    dataset = dataset.sort_index()
+    dataset = dataset.dropna(axis=0, how="any")
+    dataset = dataset.loc[:, dataset.std() > 0]
+
+    return dataset
+
+
+# ============================================================
+# COHERENCIA WAVELET
+# ============================================================
+
+def wavelet_coherence_pair(
+    x,
+    y,
+    scales,
+    wavelet="cmor1.5-1.0",
+    smooth_size=(3, 7)
+):
+    """
+    Coherencia wavelet cuadrática aproximada:
+
+        R²(s,t) = |S(Wx * conj(Wy))|²
+                  ---------------------
+                  S(|Wx|²) S(|Wy|²)
+
+    donde S es un suavizado local escala-tiempo.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    x = (x - np.nanmean(x)) / (np.nanstd(x) + 1e-12)
+    y = (y - np.nanmean(y)) / (np.nanstd(y) + 1e-12)
+
+    coef_x, _ = pywt.cwt(x, scales, wavelet)
+    coef_y, _ = pywt.cwt(y, scales, wavelet)
+
+    wxy = coef_x * np.conj(coef_y)
+
+    s_wxy = (
+        uniform_filter(wxy.real, smooth_size)
+        + 1j * uniform_filter(wxy.imag, smooth_size)
+    )
+
+    s_xx = uniform_filter(np.abs(coef_x) ** 2, smooth_size)
+    s_yy = uniform_filter(np.abs(coef_y) ** 2, smooth_size)
+
+    r2 = (np.abs(s_wxy) ** 2) / (s_xx * s_yy + 1e-12)
+    r2 = np.clip(r2, 0, 1)
+
+    return r2
+
+
+@st.cache_data
+def compute_wavelet_coherence_matrix(
+    data: pd.DataFrame,
+    min_scale: int,
+    max_scale: int,
+    n_scales: int
+):
+    """
+    Construye adj_R2:
+        adj_R2[i, j] = media de la coherencia wavelet R² entre activos i y j.
+    """
+    cols = list(data.columns)
+    n = len(cols)
+
+    scales = np.geomspace(min_scale, max_scale, n_scales)
+    mat = np.zeros((n, n), dtype=float)
+
+    values = data.values
+
+    total = n * (n - 1) // 2
+    counter = 0
+    progress = st.progress(0)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            r2 = wavelet_coherence_pair(values[:, i], values[:, j], scales)
+            mat[i, j] = np.nanmean(r2)
+            mat[j, i] = mat[i, j]
+
+            counter += 1
+            progress.progress(counter / total)
+
+    np.fill_diagonal(mat, 1.0)
+
+    return pd.DataFrame(mat, index=cols, columns=cols)
+
+
+def compute_distance_matrix(adj_r2: pd.DataFrame):
+    dist = (1 - adj_r2).copy()
+    values = dist.to_numpy(copy=True)
+    np.fill_diagonal(values, 0.0)
+
+    return pd.DataFrame(
+        values,
+        index=adj_r2.index,
+        columns=adj_r2.columns
+    )
+
+
+# ============================================================
+# ARQUETIPOS
+# ============================================================
+
+def fit_archetype_proxy(adj_r2: pd.DataFrame, n_archetypes: int = 3):
+    """
+    Aproximación práctica a arquetipos usando NMF sobre adj_R2.
+
+    Cada activo queda expresado como mezcla convexa de arquetipos.
+    """
+    X = adj_r2.values
+    X = np.maximum(X, 0)
+
+    model = NMF(
+        n_components=n_archetypes,
+        init="nndsvda",
+        random_state=33,
+        max_iter=5000
+    )
+
+    alpha = model.fit_transform(X)
+    alpha = alpha / (alpha.sum(axis=1, keepdims=True) + 1e-12)
+
+    alpha_df = pd.DataFrame(
+        alpha,
+        index=adj_r2.index,
+        columns=[f"Arquetipo {i + 1}" for i in range(n_archetypes)]
+    )
+
+    return alpha_df
+
+
+def plot_archetypes(alpha_df: pd.DataFrame):
+    plot_df = alpha_df.copy()
+    plot_df["Activo"] = plot_df.index
+    plot_df["Dominante"] = alpha_df.idxmax(axis=1)
+
+    if alpha_df.shape[1] == 3:
+        fig = px.scatter_ternary(
+            plot_df,
+            a=alpha_df.columns[0],
+            b=alpha_df.columns[1],
+            c=alpha_df.columns[2],
+            color="Dominante",
+            hover_name="Activo",
+            title="Gráfico dinámico de arquetipos"
+        )
+        fig.update_traces(marker=dict(size=12, line=dict(width=1, color="black")))
+        fig.update_layout(height=720)
+        return fig
+
+    long_df = plot_df.melt(
+        id_vars=["Activo", "Dominante"],
+        var_name="Arquetipo",
+        value_name="Peso"
+    )
+
+    fig = px.bar(
+        long_df,
+        x="Activo",
+        y="Peso",
+        color="Arquetipo",
+        barmode="stack",
+        title="Composición arquetípica de activos"
+    )
+    fig.update_layout(height=650, xaxis_tickangle=-60)
+
+    return fig
+
+
+# ============================================================
+# K-MEANS
+# ============================================================
+
+def choose_best_k_silhouette(distance_matrix: pd.DataFrame, max_k=8):
+    X = distance_matrix.values
+    results = []
+
+    upper = min(max_k, len(distance_matrix) - 1)
+
+    for k in range(2, upper + 1):
+        model = KMeans(n_clusters=k, random_state=33, n_init=25)
+        labels = model.fit_predict(X)
+
+        if len(set(labels)) > 1:
+            score = silhouette_score(X, labels)
+        else:
+            score = np.nan
+
+        results.append((k, score))
+
+    scores = pd.DataFrame(results, columns=["k", "silhouette"])
+    scores = scores.dropna()
+
+    best_k = int(scores.loc[scores["silhouette"].idxmax(), "k"])
+
+    return best_k, scores
+
+
+def fit_kmeans(distance_matrix: pd.DataFrame, k: int):
+    model = KMeans(n_clusters=k, random_state=33, n_init=25)
+    labels = model.fit_predict(distance_matrix.values)
+    return labels
+
+
+def plot_kmeans_mds(distance_matrix: pd.DataFrame, labels):
+    mds = MDS(
+        n_components=2,
+        dissimilarity="precomputed",
+        random_state=33,
+        normalized_stress="auto"
+    )
+
+    coords = mds.fit_transform(distance_matrix.values)
+
+    plot_df = pd.DataFrame({
+        "Dim 1": coords[:, 0],
+        "Dim 2": coords[:, 1],
+        "Activo": distance_matrix.index,
+        "Cluster": [f"Cluster {x + 1}" for x in labels]
+    })
+
+    fig = px.scatter(
+        plot_df,
+        x="Dim 1",
+        y="Dim 2",
+        color="Cluster",
+        text="Activo",
+        hover_name="Activo",
+        title="K-Means sobre distancia wavelet: 1 - coherencia"
+    )
+
+    fig.update_traces(textposition="top center", marker=dict(size=12))
+    fig.update_layout(height=720)
+
+    return fig
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.header("Datos")
+
+data_dir = st.sidebar.text_input(
+    "Carpeta con los Excels",
+    value="data"
+)
+
+bond_sheet = st.sidebar.selectbox(
+    "Hoja de bonos Eurostat",
+    ["Bond_2001", "Bond_2015"],
+    index=0
+)
+
+st.sidebar.header("Wavelet")
+
+min_scale = st.sidebar.slider("Escala mínima", 2, 24, 4)
+max_scale = st.sidebar.slider("Escala máxima", 16, 128, 64)
+n_scales = st.sidebar.slider("Número de escalas", 8, 48, 24)
+
+st.sidebar.header("Modelos")
+
+n_archetypes = st.sidebar.slider("Número de arquetipos", 2, 5, 3)
+
+auto_k = st.sidebar.checkbox("Elegir k automáticamente", value=True)
+manual_k = st.sidebar.slider("k manual", 2, 8, 3)
+max_k = st.sidebar.slider("Máximo k a probar", 3, 12, 8)
+
+
+# ============================================================
+# CARGA DE DATOS
+# ============================================================
+
+try:
+    data = build_dataset(data_dir, bond_sheet)
+except Exception as e:
+    st.error(str(e))
+    st.stop()
+
+st.success(f"Dataset cargado: {data.shape[0]} fechas x {data.shape[1]} activos")
+
+if data.empty:
+    st.error(
+        "El dataset está vacío. Revisa que las fechas de los Excels se solapen "
+        "y que la hoja de bonos elegida sea correcta."
+    )
+    st.stop()
+
+with st.expander("Ver datos de retornos logarítmicos"):
+    st.dataframe(data.round(6))
+
+
+selected_assets = st.multiselect(
+    "Selecciona activos",
+    options=list(data.columns),
+    default=list(data.columns)
+)
+
+if len(selected_assets) < 3:
+    st.warning("Selecciona al menos 3 activos.")
+    st.stop()
+
+data = data[selected_assets].dropna()
+
+scaler = StandardScaler()
+data_scaled = pd.DataFrame(
+    scaler.fit_transform(data),
+    index=data.index,
+    columns=data.columns
+)
+
+
+# ============================================================
+# CÁLCULO WAVELET
+# ============================================================
+
+st.subheader("Matriz de coherencia wavelet")
+
+col_a, col_b = st.columns([1, 3])
+
+with col_a:
+    calculate = st.button("Calcular coherencia wavelet")
+
+with col_b:
+    st.info(
+        "La matriz adj_R2 se calcula como la media de la coherencia wavelet "
+        "R² para cada par de activos."
+    )
+
+if calculate:
+    st.session_state["adj_r2"] = compute_wavelet_coherence_matrix(
+        data_scaled,
+        min_scale=min_scale,
+        max_scale=max_scale,
+        n_scales=n_scales
+    )
+
+if "adj_r2" not in st.session_state:
+    st.stop()
+
+adj_r2 = st.session_state["adj_r2"]
+distance_matrix = compute_distance_matrix(adj_r2)
+
+
+# ============================================================
+# TABS
+# ============================================================
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "1. Arquetipos",
+    "2. K-Means",
+    "3. Matrices",
+    "4. Series"
+])
+
+
+# ============================================================
+# TAB 1: ARQUETIPOS
+# ============================================================
+
+with tab1:
+    st.header("Gráfico dinámico de arquetipos")
+
+    alpha_df = fit_archetype_proxy(adj_r2, n_archetypes=n_archetypes)
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        fig = plot_archetypes(alpha_df)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        st.subheader("Pesos α")
+        st.dataframe(alpha_df.round(3))
+
+        dominant_df = pd.DataFrame({
+            "Activo": alpha_df.index,
+            "Arquetipo dominante": alpha_df.idxmax(axis=1),
+            "Peso dominante": alpha_df.max(axis=1)
+        }).sort_values("Arquetipo dominante")
+
+        st.subheader("Clasificación arquetípica")
+        st.dataframe(dominant_df.round(3))
+
+
+# ============================================================
+# TAB 2: K-MEANS
+# ============================================================
+
+with tab2:
+    st.header("Clustering K-Means")
+
+    if auto_k:
+        best_k, scores_df = choose_best_k_silhouette(distance_matrix, max_k=max_k)
+        k = best_k
+
+        st.success(f"k elegido automáticamente por silhouette: {k}")
+
+        fig_score = px.line(
+            scores_df,
+            x="k",
+            y="silhouette",
+            markers=True,
+            title="Selección de k por silhouette"
+        )
+        st.plotly_chart(fig_score, use_container_width=True)
+
+    else:
+        k = manual_k
+
+    labels = fit_kmeans(distance_matrix, k)
+
+    fig_km = plot_kmeans_mds(distance_matrix, labels)
+    st.plotly_chart(fig_km, use_container_width=True)
+
+    cluster_df = pd.DataFrame({
+        "Activo": distance_matrix.index,
+        "Cluster": labels + 1
+    }).sort_values("Cluster")
+
+    st.subheader("Activos por cluster")
+    st.dataframe(cluster_df)
+
+    resumen = cluster_df.groupby("Cluster")["Activo"].apply(list).reset_index()
+
+    st.subheader("Resumen por cluster")
+    st.dataframe(resumen)
+
+
+# ============================================================
+# TAB 3: MATRICES
+# ============================================================
+
+with tab3:
+    st.header("Matrices")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("adj_R2: coherencia wavelet media")
+        st.dataframe(adj_r2.round(3))
+
+        fig_heat = px.imshow(
+            adj_r2,
+            text_auto=".2f",
+            title="Heatmap de coherencia wavelet"
+        )
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+    with col2:
+        st.subheader("Distancia = 1 - adj_R2")
+        st.dataframe(distance_matrix.round(3))
+
+        fig_dist = px.imshow(
+            distance_matrix,
+            text_auto=".2f",
+            title="Heatmap de distancia wavelet"
+        )
+        st.plotly_chart(fig_dist, use_container_width=True)
+
+
+# ============================================================
+# TAB 4: SERIES
+# ============================================================
+
+with tab4:
+    st.header("Series de retornos logarítmicos")
+
+    assets_to_plot = st.multiselect(
+        "Activos a visualizar",
+        options=list(data.columns),
+        default=list(data.columns[:min(6, len(data.columns))])
+    )
+
+    if assets_to_plot:
+        fig_series = px.line(
+            data[assets_to_plot],
+            title="Retornos logarítmicos"
+        )
+        st.plotly_chart(fig_series, use_container_width=True)
