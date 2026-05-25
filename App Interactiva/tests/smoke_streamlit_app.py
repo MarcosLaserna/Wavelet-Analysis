@@ -13,7 +13,7 @@ def main() -> None:
     if app.exception:
         raise RuntimeError(f"Streamlit exceptions: {app.exception}")
 
-    expected_views = {
+    expected_tabs = {
         "1. Arquetipos",
         "2. K-Means",
         "3. Matrices",
@@ -21,32 +21,15 @@ def main() -> None:
         "5. Series",
         "6. Exportar",
     }
-    rendered_views = set(app.radio[0].options)
+    rendered_tabs = {tab.label for tab in app.tabs}
 
-    if not expected_views.issubset(rendered_views):
-        missing = expected_views - rendered_views
-        raise AssertionError(f"Missing views after automatic calculation: {sorted(missing)}")
-
-    dataset_message = app.success[0].value
-    model_message = app.success[1].value if len(app.success) > 1 else "Model view not selected"
-
-    app.radio[0].set_value("4. Red")
-    app.run(timeout=120)
-
-    headers = {header.value for header in app.header}
-    if "Red de interdependencia wavelet" not in headers:
-        raise AssertionError("Network view did not render")
-
-    app.slider[0].set_value(0.9)
-    app.run(timeout=120)
-
-    if app.radio[0].value != "4. Red":
-        raise AssertionError("Network view was not preserved after threshold change")
+    if not expected_tabs.issubset(rendered_tabs):
+        missing = expected_tabs - rendered_tabs
+        raise AssertionError(f"Missing tabs after automatic calculation: {sorted(missing)}")
 
     print("OK - Streamlit smoke test passed")
-    print(f"Dataset message: {dataset_message}")
-    print(f"Model message: {model_message}")
-    print(f"Navigation views: {len(rendered_views)}")
+    print(f"Dataset message: {app.success[0].value}")
+    print(f"Model message: {app.success[1].value}")
     print(f"Metrics rendered: {len(app.metric)}")
     print(f"Dataframes rendered: {len(app.dataframe)}")
 

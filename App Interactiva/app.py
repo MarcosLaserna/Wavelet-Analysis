@@ -445,18 +445,9 @@ def force_layout(assets: list[str], edges_df: pd.DataFrame, seed: int = 555):
     return {asset: positions[index[asset]] for asset in assets}
 
 
-def plot_wavelet_network(
-    adj_r2: pd.DataFrame,
-    threshold: float = 0.42,
-    max_edges: int = 80,
-):
+def plot_wavelet_network(adj_r2: pd.DataFrame, threshold: float = 0.42):
     assets = list(adj_r2.index)
-    all_edges_df = build_network_edges(adj_r2, threshold)
-    edges_df = (
-        all_edges_df.sort_values("weight", ascending=False)
-        .head(max_edges)
-        .reset_index(drop=True)
-    )
+    edges_df = build_network_edges(adj_r2, threshold)
     degree = weighted_degree(edges_df, assets)
     positions = force_layout(assets, edges_df)
 
@@ -573,7 +564,7 @@ def plot_wavelet_network(
         legend=dict(orientation="v", x=1.02, y=0.95),
     )
 
-    return fig, edges_df, degree, len(all_edges_df)
+    return fig, edges_df, degree
 
 
 # ============================================================
@@ -854,42 +845,26 @@ if needs_calculation:
 adj_r2 = st.session_state["adj_r2"]
 distance_matrix = compute_distance_matrix(adj_r2)
 
-alpha_df = fit_archetype_proxy(adj_r2, n_archetypes=n_archetypes)
-
-if auto_k:
-    best_k, scores_df = choose_best_k_silhouette(distance_matrix, max_k=max_k)
-    k = best_k
-else:
-    scores_df = pd.DataFrame(columns=["k", "silhouette"])
-    k = manual_k
-
-labels = fit_kmeans(distance_matrix, k)
-cluster_df = pd.DataFrame({
-    "Activo": distance_matrix.index,
-    "Cluster": labels + 1
-}).sort_values("Cluster")
-resumen = cluster_df.groupby("Cluster")["Activo"].apply(list).reset_index()
-
 
 # ============================================================
 # TABS
 # ============================================================
 
-section = st.radio(
-    "Vista",
-    [
-        "1. Arquetipos",
-        "2. K-Means",
-        "3. Matrices",
-        "4. Red",
-        "5. Series",
-        "6. Exportar",
-    ],
-    horizontal=True,
-    label_visibility="collapsed",
-)
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "1. Arquetipos",
+    "2. K-Means",
+    "3. Matrices",
+    "4. Red",
+    "5. Series",
+    "6. Exportar"
+])
 
-if section == "1. Arquetipos":
+
+# ============================================================
+# TAB 1: ARQUETIPOS
+# ============================================================
+
+with tab1:
     st.header("Gráfico dinámico de arquetipos")
 
     alpha_df = fit_archetype_proxy(adj_r2, n_archetypes=n_archetypes)
@@ -918,7 +893,7 @@ if section == "1. Arquetipos":
 # TAB 2: K-MEANS
 # ============================================================
 
-elif section == "2. K-Means":
+with tab2:
     st.header("Clustering K-Means")
 
     if auto_k:
@@ -962,7 +937,7 @@ elif section == "2. K-Means":
 # TAB 3: MATRICES
 # ============================================================
 
-elif section == "3. Matrices":
+with tab3:
     st.header("Matrices")
 
     col1, col2 = st.columns(2)
@@ -994,44 +969,24 @@ elif section == "3. Matrices":
 # TAB 4: RED
 # ============================================================
 
-elif section == "4. Red":
+with tab4:
     st.header("Red de interdependencia wavelet")
-
-    upper_values = adj_r2.to_numpy()[np.triu_indices_from(adj_r2.to_numpy(), k=1)]
-    suggested_threshold = float(np.quantile(upper_values, 0.85))
-    default_threshold = round(max(0.42, min(1.0, suggested_threshold)), 2)
 
     network_threshold = st.slider(
         "Umbral de coherencia para dibujar aristas",
         min_value=0.0,
         max_value=1.0,
-        value=default_threshold,
+        value=0.42,
         step=0.01,
         help=(
-            "En la Tercera Reunion se usaba 0.42. En este dataset la matriz "
-            "es muy densa, asi que la app propone un umbral mas alto para que "
-            "el grafo sea legible."
+            "Replica el criterio de la Tercera Reunion: se dibuja una arista "
+            "cuando adj_R2 supera el umbral."
         ),
     )
 
-    max_network_edges = st.slider(
-        "Maximo de aristas visibles",
-        min_value=10,
-        max_value=200,
-        value=80,
-        step=10,
-        help="Si hay muchas relaciones por encima del umbral, se dibujan las mas fuertes.",
-    )
-
-    fig_network, edges_df, degree, total_edges = plot_wavelet_network(
+    fig_network, edges_df, degree = plot_wavelet_network(
         adj_r2,
         threshold=network_threshold,
-        max_edges=max_network_edges,
-    )
-
-    st.caption(
-        f"Relaciones por encima del umbral: {total_edges}. "
-        f"Aristas dibujadas: {len(edges_df)}."
     )
 
     st.plotly_chart(fig_network, width="stretch")
@@ -1065,7 +1020,7 @@ elif section == "4. Red":
 # TAB 5: SERIES
 # ============================================================
 
-elif section == "5. Series":
+with tab5:
     st.header("Series de retornos logarítmicos")
 
     assets_to_plot = st.multiselect(
@@ -1086,16 +1041,8 @@ elif section == "5. Series":
 # TAB 6: EXPORTAR
 # ============================================================
 
-elif section == "6. Exportar":
+with tab6:
     st.header("Exportar resultados")
-
-    export_edges_df = build_network_edges(adj_r2, threshold=0.42)
-    export_degree = weighted_degree(export_edges_df, list(adj_r2.index))
-    export_node_summary = pd.DataFrame({
-        "Activo": export_degree.index,
-        "Sector": [classify_asset_sector(asset) for asset in export_degree.index],
-        "Degree": export_degree.values,
-    }).sort_values("Degree", ascending=False)
 
     export_sheets = {
         "retornos_log": data,
@@ -1104,8 +1051,8 @@ elif section == "6. Exportar":
         "pesos_arquetipos": alpha_df,
         "clusters": cluster_df.set_index("Activo"),
         "resumen_clusters": resumen.set_index("Cluster"),
-        "red_aristas": export_edges_df.set_index(["from", "to"]) if not export_edges_df.empty else export_edges_df,
-        "red_nodos": export_node_summary.set_index("Activo"),
+        "red_aristas": edges_df.set_index(["from", "to"]) if not edges_df.empty else edges_df,
+        "red_nodos": node_summary.set_index("Activo"),
     }
 
     if auto_k:
