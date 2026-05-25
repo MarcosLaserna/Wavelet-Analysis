@@ -1,5 +1,6 @@
 import warnings
 import os
+import zipfile
 from io import BytesIO
 from pathlib import Path
 
@@ -9,13 +10,13 @@ import pywt
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
 
 from scipy.ndimage import uniform_filter
 from sklearn.cluster import KMeans
 from sklearn.decomposition import NMF
 from sklearn.manifold import MDS
 from sklearn.metrics import silhouette_score
-from sklearn.preprocessing import StandardScaler
 
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
@@ -72,7 +73,7 @@ st.set_page_config(
 )
 
 st.title("Wavelet Archetype Lab")
-st.caption("Coherencia wavelet + arquetipos dinámicos + clustering K-Means")
+st.caption("Coherencia wavelet + arquetipoides dinámicos + clustering K-Means")
 
 
 # ============================================================
@@ -178,7 +179,7 @@ def read_hui_sheet(path, sheet_name, label):
     return returns
 
 
-def read_eurostat_bonds(path, sheet_name="Bond_2001", drop_cols=("JP", "US", "TR")):
+def read_eurostat_bonds(path, sheet_name="Bond_raw_EU", drop_cols=("EA", "EU27_2020", "JP", "US", "TR")):
     """
     Lee eurostat_bonos10.xlsx.
 
@@ -205,10 +206,38 @@ def read_eurostat_bonds(path, sheet_name="Bond_2001", drop_cols=("JP", "US", "TR
     returns = np.log(gross / gross.shift(1))
     returns = returns.replace([np.inf, -np.inf], np.nan)
     returns = returns.dropna(how="all")
-    returns = returns.dropna(axis=1, how="any")
+    returns = returns.dropna(axis=1, how="all")
     returns = to_month_index(returns)
 
     return returns
+
+
+def read_yahoo_assets(path):
+    returns = pd.read_excel(path, sheet_name="Monthly_Log_Returns")
+
+    if "Date" not in returns.columns:
+        raise ValueError(f"No encuentro la columna 'Date' en {path}")
+
+    returns["Date"] = pd.to_datetime(returns["Date"], errors="coerce")
+    returns = returns.dropna(subset=["Date"]).set_index("Date").sort_index()
+
+    for col in returns.columns:
+        returns[col] = pd.to_numeric(returns[col], errors="coerce")
+
+    returns = returns.dropna(how="all")
+    returns = returns.dropna(axis=1, how="all")
+    returns = to_month_index(returns)
+
+    metadata = pd.read_excel(path, sheet_name="Metadata")
+    metadata = metadata.rename(columns={
+        "Label": "Activo",
+        "Group": "Grupo",
+        "Sector": "Sector",
+        "Yahoo_Ticker": "Ticker",
+    })
+    metadata = metadata[metadata["Activo"].isin(returns.columns)]
+
+    return returns, metadata
 
 
 @st.cache_data
@@ -245,12 +274,67 @@ def build_dataset(data_dir: str, bond_sheet: str):
     bonds = read_eurostat_bonds(files["Bonds"], sheet_name=bond_sheet)
     series.append(bonds)
 
-    dataset = pd.concat(series, axis=1, join="inner")
+    yahoo_path = data_dir / "Yahoo_Assets.xlsx"
+    if yahoo_path.exists():
+        yahoo_returns, _ = read_yahoo_assets(yahoo_path)
+        series.append(yahoo_returns)
+
+    dataset = pd.concat(series, axis=1, join="outer")
     dataset = dataset.sort_index()
-    dataset = dataset.dropna(axis=0, how="any")
-    dataset = dataset.loc[:, dataset.std() > 0]
+    dataset = dataset.dropna(axis=0, how="all")
+    dataset = dataset.loc[:, dataset.std(skipna=True) > 0]
 
     return dataset
+
+
+@st.cache_data
+def build_asset_catalog(data_dir: str, columns: tuple[str, ...]):
+    rows = []
+
+    base_groups = {
+        "CSI_China": ("Indices verdes propios", "Green Assets", "Excel"),
+        "Wind": ("Indices verdes propios", "Green Assets", "Excel"),
+        "SP_Clean": ("Indices verdes propios", "Green Assets", "Excel"),
+        "WilderHill": ("Indices verdes propios", "Green Assets", "Excel"),
+        "Solar": ("Hui energia", "Green Assets", "Excel"),
+        "Uranium": ("Hui energia", "Energia", "Excel"),
+        "FTSE_Env": ("Hui energia", "Green Assets", "Excel"),
+        "ERIXP_EU": ("Hui energia", "Green Assets", "Excel"),
+    }
+
+    for asset in columns:
+        group, sector, source = base_groups.get(asset, ("Bonos Eurostat", "Bonos", "Excel"))
+        rows.append({
+            "Activo": asset,
+            "Grupo": group,
+            "Sector": sector,
+            "Fuente": source,
+            "Ticker": "",
+        })
+
+    yahoo_path = Path(data_dir) / "Yahoo_Assets.xlsx"
+    if yahoo_path.exists():
+        try:
+            _, yahoo_metadata = read_yahoo_assets(yahoo_path)
+            yahoo_metadata = yahoo_metadata.assign(Fuente="Yahoo Finance")
+
+            rows_by_asset = {row["Activo"]: row for row in rows}
+            for row in yahoo_metadata.to_dict("records"):
+                if row["Activo"] in rows_by_asset:
+                    rows_by_asset[row["Activo"]].update({
+                        "Grupo": row.get("Grupo", "Yahoo Finance"),
+                        "Sector": row.get("Sector", "Yahoo Finance"),
+                        "Fuente": "Yahoo Finance",
+                        "Ticker": row.get("Ticker", ""),
+                    })
+
+            rows = list(rows_by_asset.values())
+        except Exception:
+            pass
+
+    catalog = pd.DataFrame(rows)
+    catalog = catalog[catalog["Activo"].isin(columns)]
+    return catalog.sort_values(["Grupo", "Activo"]).reset_index(drop=True)
 
 
 # ============================================================
@@ -313,9 +397,7 @@ def compute_wavelet_coherence_matrix(
     n = len(cols)
 
     scales = np.geomspace(min_scale, max_scale, n_scales)
-    mat = np.zeros((n, n), dtype=float)
-
-    values = data.values
+    mat = np.full((n, n), np.nan, dtype=float)
 
     total = n * (n - 1) // 2
     counter = 0
@@ -323,14 +405,23 @@ def compute_wavelet_coherence_matrix(
 
     for i in range(n):
         for j in range(i + 1, n):
-            r2 = wavelet_coherence_pair(values[:, i], values[:, j], scales)
-            mat[i, j] = np.nanmean(r2)
+            pair = data[[cols[i], cols[j]]].dropna()
+            if len(pair) >= max(24, n_scales):
+                r2 = wavelet_coherence_pair(
+                    pair.iloc[:, 0].values,
+                    pair.iloc[:, 1].values,
+                    scales,
+                )
+                mat[i, j] = np.nanmean(r2)
+            else:
+                mat[i, j] = 0.0
             mat[j, i] = mat[i, j]
 
             counter += 1
             progress.progress(counter / total)
 
     np.fill_diagonal(mat, 1.0)
+    mat = np.nan_to_num(mat, nan=0.0)
 
     return pd.DataFrame(mat, index=cols, columns=cols)
 
@@ -352,6 +443,40 @@ def compute_distance_matrix(adj_r2: pd.DataFrame):
 # ============================================================
 
 def classify_asset_sector(asset_name: str) -> str:
+    sector_by_asset = {
+        "Nvidia": "Tecnologia",
+        "Microsoft": "Tecnologia",
+        "Apple": "Tecnologia",
+        "Google": "Tecnologia",
+        "Tesla": "Tecnologia",
+        "Bitcoin": "Crypto",
+        "Ethereum": "Crypto",
+        "Solana": "Crypto",
+        "Binance": "Crypto",
+        "Exxon": "Energia",
+        "Chevron": "Energia",
+        "Boeing": "Industrial",
+        "Caterpillar": "Industrial",
+        "EliLilly": "Farmaceutica y Defensa",
+        "J&J": "Farmaceutica y Defensa",
+        "Pfizer": "Farmaceutica y Defensa",
+        "Merck": "Farmaceutica y Defensa",
+        "AbbVie": "Farmaceutica y Defensa",
+        "S&P500": "Indices",
+        "Nasdaq": "Indices",
+        "VIX": "Indices",
+        "ORO": "Commodities",
+        "Bonos20A": "Bonos",
+        "Dolar_IDX": "Divisas",
+        "Euro": "Divisas",
+        "Libra": "Divisas",
+        "Yen": "Divisas",
+        "FrancoSuizo": "Divisas",
+        "AudDolar": "Divisas",
+    }
+    if asset_name in sector_by_asset:
+        return sector_by_asset[asset_name]
+
     green_assets = {
         "CSI_China",
         "Wind",
@@ -361,6 +486,14 @@ def classify_asset_sector(asset_name: str) -> str:
         "Uranium",
         "FTSE_Env",
         "ERIXP_EU",
+        "SPGBI",
+        "GRNENEF",
+        "GRNFUEL",
+        "GRNGB",
+        "GRNPOL",
+        "GRNSOLAR",
+        "GRNTRN",
+        "GRNWIND",
     }
     return "Green Assets" if asset_name in green_assets else "Conventional"
 
@@ -392,7 +525,12 @@ def weighted_degree(edges_df: pd.DataFrame, assets: list[str]):
     return degree.replace(0, 0.5)
 
 
-def force_layout(assets: list[str], edges_df: pd.DataFrame, seed: int = 555):
+def force_layout(
+    assets: list[str],
+    edges_df: pd.DataFrame,
+    initial_positions: np.ndarray | None = None,
+    seed: int = 555,
+):
     """
     Layout de fuerzas reproducible inspirado en Fruchterman-Reingold.
     Evita añadir networkx como dependencia solo para esta visualizacion.
@@ -403,11 +541,14 @@ def force_layout(assets: list[str], edges_df: pd.DataFrame, seed: int = 555):
     if n == 1:
         return {assets[0]: np.array([0.0, 0.0])}
 
-    positions = rng.uniform(-1.0, 1.0, size=(n, 2))
+    if initial_positions is None:
+        positions = rng.uniform(-1.0, 1.0, size=(n, 2))
+    else:
+        positions = np.asarray(initial_positions, dtype=float).copy()
     index = {asset: idx for idx, asset in enumerate(assets)}
     area = 4.0
     k = np.sqrt(area / n)
-    temperature = 0.45
+    temperature = 0.18
 
     edge_pairs = [
         (index[row["from"]], index[row["to"]], float(row["weight"]))
@@ -415,20 +556,21 @@ def force_layout(assets: list[str], edges_df: pd.DataFrame, seed: int = 555):
         if row["from"] in index and row["to"] in index
     ]
 
-    for _ in range(450):
+    for _ in range(700):
         disp = np.zeros_like(positions)
 
         for i in range(n):
             delta = positions[i] - positions
             distance = np.linalg.norm(delta, axis=1) + 1e-9
-            force = (k * k / distance)[:, None] * delta / distance[:, None]
+            force = (0.22 * k * k / distance)[:, None] * delta / distance[:, None]
             force[i] = 0
             disp[i] += force.sum(axis=0)
 
         for source, target, weight in edge_pairs:
             delta = positions[source] - positions[target]
             distance = np.linalg.norm(delta) + 1e-9
-            force = (distance * distance / k) * (0.45 + weight)
+            target_distance = 0.08 + 0.72 * (1 - weight) ** 2
+            force = (distance - target_distance) * (0.30 + 7.5 * weight ** 2)
             vector = (delta / distance) * force
             disp[source] -= vector
             disp[target] += vector
@@ -436,7 +578,7 @@ def force_layout(assets: list[str], edges_df: pd.DataFrame, seed: int = 555):
         lengths = np.linalg.norm(disp, axis=1) + 1e-9
         positions += (disp / lengths[:, None]) * np.minimum(lengths, temperature)[:, None]
         positions -= positions.mean(axis=0)
-        temperature *= 0.992
+        temperature *= 0.994
 
     max_abs = np.abs(positions).max()
     if max_abs > 0:
@@ -445,15 +587,62 @@ def force_layout(assets: list[str], edges_df: pd.DataFrame, seed: int = 555):
     return {asset: positions[index[asset]] for asset in assets}
 
 
-def plot_wavelet_network(adj_r2: pd.DataFrame, threshold: float = 0.42):
+def network_layout(adj_r2: pd.DataFrame, threshold: float = 0.42):
     assets = list(adj_r2.index)
     edges_df = build_network_edges(adj_r2, threshold)
+    dist_for_layout = (1 - adj_r2).clip(lower=0, upper=1)
+    labels = None
+
+    if len(assets) >= 4:
+        k_layout = min(5, len(assets) - 1)
+        labels = KMeans(n_clusters=k_layout, random_state=555, n_init=25).fit_predict(
+            dist_for_layout.values
+        )
+
+    if len(assets) >= 3:
+        mds_positions = MDS(
+            n_components=2,
+            dissimilarity="precomputed",
+            random_state=555,
+            normalized_stress="auto",
+        ).fit_transform(dist_for_layout.values)
+
+        if labels is not None:
+            initial_positions = np.zeros_like(mds_positions)
+            angles = np.linspace(0, 2 * np.pi, len(set(labels)), endpoint=False)
+            centers = np.column_stack([np.cos(angles), np.sin(angles)]) * 1.15
+            for cluster_id in sorted(set(labels)):
+                idx = np.where(labels == cluster_id)[0]
+                local = mds_positions[idx]
+                local = local - local.mean(axis=0)
+                scale = np.abs(local).max() or 1.0
+                initial_positions[idx] = centers[cluster_id] + 0.35 * local / scale
+        else:
+            initial_positions = mds_positions
+    else:
+        initial_positions = None
+
+    positions = force_layout(assets, edges_df, initial_positions=initial_positions)
+    return positions, edges_df
+
+
+def plot_wavelet_network(adj_r2: pd.DataFrame, threshold: float = 0.42):
+    assets = list(adj_r2.index)
+    positions, edges_df = network_layout(adj_r2, threshold=threshold)
     degree = weighted_degree(edges_df, assets)
-    positions = force_layout(assets, edges_df)
 
     sector_colors = {
-        "Green Assets": "green",
-        "Conventional": "orange",
+        "Green Assets": "#2ca02c",
+        "Conventional": "#ff7f0e",
+        "Tecnologia": "#1f77b4",
+        "Crypto": "#d62728",
+        "Energia": "#17becf",
+        "Industrial": "#8c564b",
+        "Farmaceutica y Defensa": "#9467bd",
+        "Indices": "#7f7f7f",
+        "Commodities": "#bcbd22",
+        "Bonos": "#aec7e8",
+        "Divisas": "#e377c2",
     }
 
     fig = go.Figure()
@@ -520,7 +709,7 @@ def plot_wavelet_network(adj_r2: pd.DataFrame, threshold: float = 0.42):
 
         node_x.append(x)
         node_y.append(y)
-        node_color.append(sector_colors[sector])
+        node_color.append(sector_colors.get(sector, "#ff7f0e"))
         node_size.append(14 + 28 * scaled_degree)
         node_text.append(asset)
         hover_text.append(
@@ -568,32 +757,36 @@ def plot_wavelet_network(adj_r2: pd.DataFrame, threshold: float = 0.42):
 
 
 # ============================================================
-# ARQUETIPOS
+# ARQUETIPOIDES
 # ============================================================
 
 def fit_archetype_proxy(adj_r2: pd.DataFrame, n_archetypes: int = 3):
     """
-    Aproximación práctica a arquetipos usando NMF sobre adj_R2.
-
-    Cada activo queda expresado como mezcla convexa de arquetipos.
+    Aproximacion practica a arquetipoides usando activos reales como extremos.
     """
-    X = adj_r2.values
-    X = np.maximum(X, 0)
+    assets = list(adj_r2.index)
+    n_components = min(n_archetypes, len(assets))
+    dist = (1 - adj_r2).to_numpy(copy=True)
+    np.fill_diagonal(dist, 0.0)
 
-    model = NMF(
-        n_components=n_archetypes,
-        init="nndsvda",
-        random_state=33,
-        max_iter=5000
-    )
+    selected = [int(np.argmax(dist.mean(axis=1)))]
+    while len(selected) < n_components:
+        min_dist = dist[:, selected].min(axis=1)
+        min_dist[selected] = -1
+        selected.append(int(np.argmax(min_dist)))
 
-    alpha = model.fit_transform(X)
-    alpha = alpha / (alpha.sum(axis=1, keepdims=True) + 1e-12)
+    archetypoids = [assets[i] for i in selected]
+    scores = 1 / (dist[:, selected] + 1e-6)
+    alpha = scores / (scores.sum(axis=1, keepdims=True) + 1e-12)
+
+    for pos, asset_idx in enumerate(selected):
+        alpha[asset_idx, :] = 0
+        alpha[asset_idx, pos] = 1
 
     alpha_df = pd.DataFrame(
         alpha,
         index=adj_r2.index,
-        columns=[f"Arquetipo {i + 1}" for i in range(n_archetypes)]
+        columns=[f"Arquetipoide {i + 1}: {name}" for i, name in enumerate(archetypoids)]
     )
 
     return alpha_df
@@ -612,7 +805,7 @@ def plot_archetypes(alpha_df: pd.DataFrame):
             c=alpha_df.columns[2],
             color="Dominante",
             hover_name="Activo",
-            title="Gráfico dinámico de arquetipos"
+            title="Grafico dinamico de arquetipoides"
         )
         fig.update_traces(marker=dict(size=12, line=dict(width=1, color="black")))
         fig.update_layout(height=720)
@@ -620,7 +813,7 @@ def plot_archetypes(alpha_df: pd.DataFrame):
 
     long_df = plot_df.melt(
         id_vars=["Activo", "Dominante"],
-        var_name="Arquetipo",
+        var_name="Arquetipoide",
         value_name="Peso"
     )
 
@@ -628,9 +821,9 @@ def plot_archetypes(alpha_df: pd.DataFrame):
         long_df,
         x="Activo",
         y="Peso",
-        color="Arquetipo",
+        color="Arquetipoide",
         barmode="stack",
-        title="Composición arquetípica de activos"
+        title="Composicion por arquetipoides"
     )
     fig.update_layout(height=650, xaxis_tickangle=-60)
 
@@ -706,6 +899,266 @@ def plot_kmeans_mds(distance_matrix: pd.DataFrame, labels):
 
 
 # ============================================================
+# EXPORTACION DE GRAFICOS
+# ============================================================
+
+def pil_font(size: int, bold: bool = False):
+    candidates = [
+        "arialbd.ttf" if bold else "arial.ttf",
+        "calibrib.ttf" if bold else "calibri.ttf",
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            pass
+    return ImageFont.load_default()
+
+
+def draw_wrapped(draw, text, xy, font, fill=(30, 30, 30), max_width=980, line_gap=5):
+    x, y = xy
+    words = str(text).split()
+    line = ""
+    for word in words:
+        trial = f"{line} {word}".strip()
+        if draw.textbbox((0, 0), trial, font=font)[2] <= max_width:
+            line = trial
+        else:
+            draw.text((x, y), line, font=font, fill=fill)
+            y += font.size + line_gap
+            line = word
+    if line:
+        draw.text((x, y), line, font=font, fill=fill)
+        y += font.size + line_gap
+    return y
+
+
+def hex_to_rgb(value: str):
+    value = value.lstrip("#")
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def new_pdf_page(title: str):
+    image = Image.new("RGB", (1240, 1754), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([0, 0, 1240, 88], fill=(23, 50, 77))
+    draw.text((58, 28), title, font=pil_font(28, bold=True), fill="white")
+    draw.line([58, 118, 1182, 118], fill=(210, 218, 226), width=2)
+    return image, draw
+
+
+def draw_heatmap(draw, matrix: pd.DataFrame, box, title: str):
+    x0, y0, x1, y1 = box
+    draw.text((x0, y0 - 34), title, font=pil_font(22, bold=True), fill=(23, 50, 77))
+    max_assets = min(22, len(matrix))
+    if len(matrix) > max_assets:
+        strength = matrix.sum(axis=1).sort_values(ascending=False).head(max_assets).index
+        matrix = matrix.loc[strength, strength]
+    labels_short = [str(x)[:9] for x in matrix.index]
+    values = matrix.values
+    n = len(matrix)
+    if n == 0:
+        return
+    left_label = 135
+    top_label = 72
+    grid_w = x1 - x0 - left_label
+    grid_h = y1 - y0 - top_label
+    cell = int(min(grid_w, grid_h) / n)
+    gx = x0 + left_label
+    gy = y0 + top_label
+    for i in range(n):
+        draw.text((x0, gy + i * cell + 2), labels_short[i], font=pil_font(10), fill=(40, 40, 40))
+        draw.text((gx + i * cell + 2, y0 + 8), labels_short[i], font=pil_font(9), fill=(40, 40, 40))
+        for j in range(n):
+            v = float(values[i, j])
+            if np.isnan(v):
+                color = (235, 235, 235)
+            else:
+                red = int(247 - 210 * v)
+                green = int(251 - 120 * v)
+                blue = int(255 - 155 * v)
+                color = (max(20, red), max(50, green), max(80, blue))
+            draw.rectangle(
+                [gx + j * cell, gy + i * cell, gx + (j + 1) * cell, gy + (i + 1) * cell],
+                fill=color,
+                outline=(245, 245, 245),
+            )
+            if n <= 24:
+                text_color = (255, 255, 255) if v > 0.55 else (20, 20, 20)
+                draw.text(
+                    (gx + j * cell + 3, gy + i * cell + max(2, cell // 4)),
+                    f"{v:.2f}",
+                    font=pil_font(max(8, min(14, cell // 3)), bold=False),
+                    fill=text_color,
+                )
+
+
+def draw_network_pdf(draw, adj_r2: pd.DataFrame, threshold: float, box):
+    x0, y0, x1, y1 = box
+    positions, edges = network_layout(adj_r2, threshold)
+    degree = weighted_degree(edges, list(adj_r2.index))
+    sector_colors = {
+        "Green Assets": "#2ca02c",
+        "Conventional": "#ff7f0e",
+        "Tecnologia": "#1f77b4",
+        "Crypto": "#d62728",
+        "Energia": "#17becf",
+        "Industrial": "#8c564b",
+        "Farmaceutica y Defensa": "#9467bd",
+        "Indices": "#7f7f7f",
+        "Commodities": "#bcbd22",
+        "Bonos": "#aec7e8",
+        "Divisas": "#e377c2",
+    }
+
+    def map_xy(pos):
+        px = x0 + (pos[0] + 1.15) / 2.3 * (x1 - x0)
+        py = y1 - (pos[1] + 1.15) / 2.3 * (y1 - y0)
+        return px, py
+
+    if not edges.empty:
+        top_edges = edges.sort_values("weight", ascending=False).head(90)
+        min_w = float(top_edges["weight"].min())
+        max_w = float(top_edges["weight"].max())
+        for _, edge in top_edges.sort_values("weight").iterrows():
+            p0 = map_xy(positions[edge["from"]])
+            p1 = map_xy(positions[edge["to"]])
+            scaled = (float(edge["weight"]) - min_w) / (max_w - min_w + 1e-9)
+            width = int(1 + 5 * scaled)
+            shade = int(170 - 120 * scaled)
+            draw.line([p0, p1], fill=(shade, shade, shade), width=width)
+
+    min_d = float(degree.min())
+    max_d = float(degree.max())
+    for asset, pos in positions.items():
+        px, py = map_xy(pos)
+        deg = float(degree.loc[asset])
+        scaled = (deg - min_d) / (max_d - min_d + 1e-9)
+        radius = int(8 + 14 * scaled)
+        color = hex_to_rgb(sector_colors.get(classify_asset_sector(asset), "#ff7f0e"))
+        draw.ellipse([px - radius, py - radius, px + radius, py + radius], fill=color, outline=(0, 0, 0), width=2)
+        draw.text((px + radius + 3, py - 6), str(asset)[:12], font=pil_font(11), fill=(20, 20, 20))
+
+
+def image_bytes(image: Image.Image):
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def plotly_png_bytes(fig, width=1800, height=1400, scale=2):
+    try:
+        return fig.to_image(format="png", width=width, height=height, scale=scale)
+    except Exception:
+        return None
+
+
+@st.cache_data
+def build_graphics_zip_bytes(
+    data: pd.DataFrame,
+    adj_r2: pd.DataFrame,
+    distance_matrix: pd.DataFrame,
+    alpha_df: pd.DataFrame,
+    cluster_df: pd.DataFrame,
+    network_threshold: float,
+):
+    graphics = {}
+
+    fig_network, _, _ = plot_wavelet_network(adj_r2, threshold=network_threshold)
+    exported = plotly_png_bytes(fig_network, width=2200, height=1600, scale=2)
+    if exported is None:
+        image = Image.new("RGB", (2200, 1600), "white")
+        draw = ImageDraw.Draw(image)
+        draw_network_pdf(draw, adj_r2, network_threshold, (90, 80, 2110, 1510))
+        exported = image_bytes(image)
+    graphics["01_red_wavelet.png"] = exported
+
+    fig_heat = px.imshow(adj_r2, text_auto=".2f", title="Heatmap de coherencia wavelet")
+    exported = plotly_png_bytes(fig_heat, width=2200, height=1800, scale=2)
+    if exported is None:
+        image = Image.new("RGB", (2200, 1800), "white")
+        draw = ImageDraw.Draw(image)
+        draw_heatmap(draw, adj_r2, (80, 130, 2120, 1680), "adj_R2")
+        exported = image_bytes(image)
+    graphics["02_matriz_coherencia_adj_R2.png"] = exported
+
+    long_alpha = (
+        alpha_df.reset_index(names="Activo")
+        .melt(id_vars="Activo", var_name="Arquetipoide", value_name="Peso")
+    )
+    fig_archetypes = px.bar(
+        long_alpha,
+        x="Activo",
+        y="Peso",
+        color="Arquetipoide",
+        barmode="stack",
+        title="Composicion por arquetipoides",
+    )
+    fig_archetypes.update_layout(height=800, xaxis_tickangle=-60)
+    exported = plotly_png_bytes(fig_archetypes, width=2200, height=1600, scale=2)
+    if exported is None:
+        image = Image.new("RGB", (2200, 1600), "white")
+        draw = ImageDraw.Draw(image)
+        shown_alpha = alpha_df.head(28)
+        colors_archetypes = [
+            (31, 119, 180),
+            (214, 39, 40),
+            (44, 160, 44),
+            (148, 103, 189),
+            (255, 127, 14),
+        ]
+        y = 80
+        draw.text((80, y), "Composicion por arquetipoides", font=pil_font(34, bold=True), fill=(20, 20, 20))
+        y += 70
+        for asset, row in shown_alpha.iterrows():
+            draw.text((95, y), str(asset)[:24], font=pil_font(22, bold=True), fill=(30, 30, 30))
+            draw.rectangle([430, y + 4, 1330, y + 34], outline=(190, 190, 190))
+            x_start = 430
+            for idx, value in enumerate(row.values):
+                segment_w = int(900 * float(value))
+                draw.rectangle(
+                    [x_start, y + 4, x_start + segment_w, y + 34],
+                    fill=colors_archetypes[idx % len(colors_archetypes)],
+                )
+                x_start += segment_w
+            y += 45
+        exported = image_bytes(image)
+    graphics["03_arquetipoides.png"] = exported
+
+    plot_data = data.iloc[:, :min(8, data.shape[1])].dropna(how="all")
+    fig_series = px.line(plot_data, title="Retornos logarítmicos")
+    exported = plotly_png_bytes(fig_series, width=2200, height=1600, scale=2)
+    if exported is None:
+        image = Image.new("RGB", (2200, 1600), "white")
+        draw = ImageDraw.Draw(image)
+        x0, y0, x1, y1 = 120, 130, 2080, 1250
+        draw.rectangle([x0, y0, x1, y1], outline=(180, 180, 180), width=2)
+        if not plot_data.empty:
+            colors_series = [(31, 119, 180), (214, 39, 40), (44, 160, 44), (148, 103, 189), (255, 127, 14), (127, 127, 127), (23, 190, 207), (188, 189, 34)]
+            min_v = float(plot_data.min().min())
+            max_v = float(plot_data.max().max())
+            span = max(max_v - min_v, 1e-9)
+            for idx, col in enumerate(plot_data.columns):
+                series = plot_data[col].interpolate().fillna(0)
+                points = []
+                for i, value in enumerate(series.values):
+                    point_x = x0 + i / max(1, len(series) - 1) * (x1 - x0)
+                    point_y = y1 - (float(value) - min_v) / span * (y1 - y0)
+                    points.append((point_x, point_y))
+                if len(points) >= 2:
+                    draw.line(points, fill=colors_series[idx % len(colors_series)], width=4)
+                draw.text((140, 1290 + idx * 30), str(col), font=pil_font(20), fill=colors_series[idx % len(colors_series)])
+        exported = image_bytes(image)
+    graphics["04_series_retornos.png"] = exported
+
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, content in graphics.items():
+            archive.writestr(name, content)
+    return output.getvalue()
+
+
+# ============================================================
 # SIDEBAR
 # ============================================================
 
@@ -716,11 +1169,8 @@ data_dir = st.sidebar.text_input(
     value=default_data_dir()
 )
 
-bond_sheet = st.sidebar.selectbox(
-    "Hoja de bonos Eurostat",
-    ["Bond_2001", "Bond_2015"],
-    index=0
-)
+bond_sheet = "Bond_raw_EU"
+st.sidebar.caption("Bonos Eurostat unificados: historico completo con huecos gestionados por pares.")
 
 st.sidebar.header("Wavelet")
 
@@ -730,7 +1180,7 @@ n_scales = st.sidebar.slider("Número de escalas", 8, 48, 24)
 
 st.sidebar.header("Modelos")
 
-n_archetypes = st.sidebar.slider("Número de arquetipos", 2, 5, 3)
+n_archetypes = st.sidebar.slider("Número de arquetipoides", 2, 5, 3)
 
 auto_k = st.sidebar.checkbox("Elegir k automáticamente", value=True)
 manual_k = st.sidebar.slider("k manual", 2, 8, 3)
@@ -751,11 +1201,10 @@ st.success(f"Dataset cargado: {data.shape[0]} fechas x {data.shape[1]} activos")
 
 date_min = data.index.min().strftime("%Y-%m")
 date_max = data.index.max().strftime("%Y-%m")
-summary_cols = st.columns(4)
+summary_cols = st.columns(3)
 summary_cols[0].metric("Observaciones mensuales", f"{data.shape[0]}")
 summary_cols[1].metric("Activos disponibles", f"{data.shape[1]}")
 summary_cols[2].metric("Periodo", f"{date_min} / {date_max}")
-summary_cols[3].metric("Hoja de bonos", bond_sheet)
 
 if data.empty:
     st.error(
@@ -768,33 +1217,92 @@ with st.expander("Ver datos de retornos logarítmicos"):
     st.dataframe(data.round(6))
 
 
+asset_catalog = build_asset_catalog(data_dir, tuple(data.columns))
+all_groups = list(asset_catalog["Grupo"].drop_duplicates())
+preferred_groups = [
+    "Tecnologia",
+    "Crypto",
+    "Divisas",
+    "Farmaceutica y Defensa",
+]
+default_groups = [group for group in preferred_groups if group in all_groups]
+if not default_groups:
+    default_groups = all_groups[:min(3, len(all_groups))]
+
+selected_groups = st.multiselect(
+    "Filtra por grupos de activos",
+    options=all_groups,
+    default=default_groups,
+)
+
+filtered_assets = asset_catalog.loc[
+    asset_catalog["Grupo"].isin(selected_groups),
+    "Activo",
+].tolist()
+
+group_assets_signature = tuple(filtered_assets)
+if st.session_state.get("group_assets_signature") != group_assets_signature:
+    st.session_state["selected_assets"] = filtered_assets.copy()
+    st.session_state["group_assets_signature"] = group_assets_signature
+
 selected_assets = st.multiselect(
     "Selecciona activos",
-    options=list(data.columns),
-    default=list(data.columns)
+    options=filtered_assets,
+    key="selected_assets",
 )
 
 if len(selected_assets) < 3:
     st.warning("Selecciona al menos 3 activos.")
     st.stop()
 
-data = data[selected_assets].dropna()
-
-scaler = StandardScaler()
-data_scaled = pd.DataFrame(
-    scaler.fit_transform(data),
-    index=data.index,
-    columns=data.columns
+month_options = sorted(pd.Index(data.index.strftime("%Y-%m")).unique().tolist())
+selected_month_range = st.select_slider(
+    "Rango temporal del analisis",
+    options=month_options,
+    value=(month_options[0], month_options[-1]),
 )
+start_month = pd.to_datetime(selected_month_range[0])
+end_month = pd.to_datetime(selected_month_range[1])
+data = data.loc[start_month:end_month]
+
+if data.shape[0] < 12:
+    st.warning("Selecciona al menos 12 meses para que el analisis sea estable.")
+    st.stop()
+
+with st.expander("Ver catalogo de activos"):
+    st.dataframe(
+        asset_catalog[asset_catalog["Activo"].isin(filtered_assets)],
+        width="stretch",
+    )
+
+data = data[selected_assets].dropna(how="all")
+valid_selected_assets = [asset for asset in data.columns if data[asset].notna().sum() >= max(24, n_scales)]
+excluded_assets = [asset for asset in selected_assets if asset not in valid_selected_assets]
+data = data[valid_selected_assets]
+
+if len(valid_selected_assets) < 3:
+    st.warning("Con este rango temporal hay menos de 3 activos con datos suficientes.")
+    st.stop()
+
+if excluded_assets:
+    st.info(
+        "Activos excluidos en este rango por datos insuficientes: "
+        + ", ".join(excluded_assets)
+    )
+
+data_scaled = data.copy()
 
 with st.expander("Configuracion del analisis"):
     st.write(
         {
             "activos_seleccionados": len(selected_assets),
+            "activos_usados": len(valid_selected_assets),
+            "rango_temporal": f"{selected_month_range[0]} a {selected_month_range[1]}",
+            "observaciones_en_rango": int(data.shape[0]),
             "escala_minima": min_scale,
             "escala_maxima": max_scale,
             "numero_escalas": n_scales,
-            "numero_arquetipos": n_archetypes,
+            "numero_arquetipoides": n_archetypes,
             "seleccion_k_automatica": auto_k,
             "maximo_k": max_k if auto_k else manual_k,
         }
@@ -846,26 +1354,72 @@ adj_r2 = st.session_state["adj_r2"]
 distance_matrix = compute_distance_matrix(adj_r2)
 
 
-# ============================================================
-# TABS
-# ============================================================
-
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "1. Arquetipos",
+TAB_LABELS = [
+    "1. Arquetipoides",
     "2. K-Means",
     "3. Matrices",
     "4. Red",
     "5. Series",
     "6. Exportar"
-])
+]
+
+if st.session_state.get("active_tab") not in TAB_LABELS:
+    st.session_state["active_tab"] = TAB_LABELS[0]
+
+active_tab = st.radio(
+    "Vista",
+    options=TAB_LABELS,
+    horizontal=True,
+    key="active_tab",
+    label_visibility="collapsed",
+)
+
+alpha_df = fit_archetype_proxy(adj_r2, n_archetypes=n_archetypes)
+
+if auto_k:
+    best_k, scores_df = choose_best_k_silhouette(distance_matrix, max_k=max_k)
+    k = best_k
+else:
+    scores_df = pd.DataFrame()
+    k = manual_k
+
+labels = fit_kmeans(distance_matrix, k)
+cluster_df = pd.DataFrame({
+    "Activo": distance_matrix.index,
+    "Cluster": labels + 1
+}).sort_values("Cluster")
+resumen = cluster_df.groupby("Cluster")["Activo"].apply(list).reset_index()
+
+network_threshold = st.session_state.get("network_threshold", 0.42)
+edges_df = build_network_edges(adj_r2, network_threshold)
+degree = weighted_degree(edges_df, list(adj_r2.index))
+node_summary = pd.DataFrame({
+    "Activo": degree.index,
+    "Sector": [classify_asset_sector(asset) for asset in degree.index],
+    "Degree": degree.values,
+}).sort_values("Degree", ascending=False)
+
+st.sidebar.download_button(
+    "Descargar resultados",
+    data=build_graphics_zip_bytes(
+        data=data,
+        adj_r2=adj_r2,
+        distance_matrix=distance_matrix,
+        alpha_df=alpha_df,
+        cluster_df=cluster_df,
+        network_threshold=float(st.session_state.get("network_threshold", 0.42)),
+    ),
+    file_name="wavelet_graficos_resultados.zip",
+    mime="application/zip",
+)
 
 
 # ============================================================
 # TAB 1: ARQUETIPOS
 # ============================================================
 
-with tab1:
-    st.header("Gráfico dinámico de arquetipos")
+if active_tab == "1. Arquetipoides":
+    st.header("Grafico dinamico de arquetipoides")
 
     alpha_df = fit_archetype_proxy(adj_r2, n_archetypes=n_archetypes)
 
@@ -881,9 +1435,9 @@ with tab1:
 
         dominant_df = pd.DataFrame({
             "Activo": alpha_df.index,
-            "Arquetipo dominante": alpha_df.idxmax(axis=1),
+            "Arquetipoide dominante": alpha_df.idxmax(axis=1),
             "Peso dominante": alpha_df.max(axis=1)
-        }).sort_values("Arquetipo dominante")
+        }).sort_values("Arquetipoide dominante")
 
         st.subheader("Clasificación arquetípica")
         st.dataframe(dominant_df.round(3))
@@ -893,7 +1447,7 @@ with tab1:
 # TAB 2: K-MEANS
 # ============================================================
 
-with tab2:
+if active_tab == "2. K-Means":
     st.header("Clustering K-Means")
 
     if auto_k:
@@ -937,7 +1491,7 @@ with tab2:
 # TAB 3: MATRICES
 # ============================================================
 
-with tab3:
+if active_tab == "3. Matrices":
     st.header("Matrices")
 
     col1, col2 = st.columns(2)
@@ -969,15 +1523,16 @@ with tab3:
 # TAB 4: RED
 # ============================================================
 
-with tab4:
+if active_tab == "4. Red":
     st.header("Red de interdependencia wavelet")
 
     network_threshold = st.slider(
         "Umbral de coherencia para dibujar aristas",
         min_value=0.0,
         max_value=1.0,
-        value=0.42,
+        value=float(st.session_state.get("network_threshold", 0.42)),
         step=0.01,
+        key="network_threshold",
         help=(
             "Replica el criterio de la Tercera Reunion: se dibuja una arista "
             "cuando adj_R2 supera el umbral."
@@ -987,6 +1542,12 @@ with tab4:
     fig_network, edges_df, degree = plot_wavelet_network(
         adj_r2,
         threshold=network_threshold,
+    )
+
+    total_possible_edges = len(adj_r2) * (len(adj_r2) - 1) // 2
+    st.caption(
+        f"Aristas visibles: {len(edges_df)} de {total_possible_edges} posibles "
+        f"(solo adj_R2 > {network_threshold:.2f})."
     )
 
     st.plotly_chart(fig_network, width="stretch")
@@ -1011,8 +1572,8 @@ with tab4:
 
     st.caption(
         "Estilo basado en la seccion 2.2 de Tercera Reunion: layout de fuerzas, "
-        "aristas ponderadas por coherencia, flechas, nodos verdes para activos "
-        "verdes y naranjas para convencionales."
+        "aristas ponderadas por coherencia, flechas y nodos coloreados por grupo "
+        "o sector."
     )
 
 
@@ -1020,7 +1581,7 @@ with tab4:
 # TAB 5: SERIES
 # ============================================================
 
-with tab5:
+if active_tab == "5. Series":
     st.header("Series de retornos logarítmicos")
 
     assets_to_plot = st.multiselect(
@@ -1041,14 +1602,14 @@ with tab5:
 # TAB 6: EXPORTAR
 # ============================================================
 
-with tab6:
+if active_tab == "6. Exportar":
     st.header("Exportar resultados")
 
     export_sheets = {
         "retornos_log": data,
         "coherencia_adj_R2": adj_r2,
         "distancia_wavelet": distance_matrix,
-        "pesos_arquetipos": alpha_df,
+        "pesos_arquetipoides": alpha_df,
         "clusters": cluster_df.set_index("Activo"),
         "resumen_clusters": resumen.set_index("Cluster"),
         "red_aristas": edges_df.set_index(["from", "to"]) if not edges_df.empty else edges_df,

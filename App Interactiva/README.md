@@ -38,6 +38,7 @@ o una carpeta `data/` dentro del repositorio con estos archivos:
 - `WilderHill.xlsx`
 - `DATA revisados Hui.xlsx`
 - `eurostat_bonos10.xlsx`
+- `Yahoo_Assets.xlsx` opcional, generado desde Yahoo Finance
 
 ### Hojas relevantes
 
@@ -48,6 +49,9 @@ o una carpeta `data/` dentro del repositorio con estos archivos:
   - `ERIXP USD`
 - `eurostat_bonos10.xlsx`:
   - `Bond_2001` o `Bond_2015`
+- `Yahoo_Assets.xlsx`:
+  - `Metadata`
+  - `Monthly_Log_Returns`
 
 > Si cambias la ruta, puedes hacerlo desde el sidebar (“Carpeta con los Excels”).
 
@@ -77,6 +81,12 @@ Luego abre la URL local que muestra Streamlit (normalmente `http://localhost:850
 La app intenta detectar automaticamente la carpeta de datos. Primero busca `data/`
 dentro del repositorio y despues `Datos/` en la carpeta padre del proyecto, que
 es la organizacion recomendada para este workspace.
+
+Para regenerar los activos de Yahoo Finance:
+
+```bash
+python scripts/download_yahoo_assets.py
+```
 
 ---
 

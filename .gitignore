@@ -12,6 +12,7 @@ __pycache__/
 App Interactiva/.venv/
 App Interactiva/.venv_app/
 App Interactiva/.codex_deps/
+App Interactiva/.yfinance_cache/
 
 # Streamlit local secrets/logs
 .streamlit/secrets.toml

@@ -6,3 +6,6 @@ streamlit
 scipy
 scikit-learn
 openpyxl
+yfinance
+pillow
+kaleido
