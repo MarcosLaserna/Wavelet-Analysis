@@ -1155,6 +1155,8 @@ def build_graphics_zip_bytes(
     adj_r2: pd.DataFrame,
     distance_matrix: pd.DataFrame,
     alpha_df: pd.DataFrame,
+    bi_asset_weights: pd.DataFrame,
+    bi_time_weights: pd.DataFrame,
     cluster_df: pd.DataFrame,
     network_threshold: float,
 ):
@@ -1221,6 +1223,18 @@ def build_graphics_zip_bytes(
         exported = image_bytes(image)
     graphics["03_arquetipoides.png"] = exported
 
+    fig_bi_assets = plot_biarchetype_assets(bi_asset_weights)
+    exported = plotly_png_bytes(fig_bi_assets, width=2200, height=1600, scale=2)
+    if exported is None:
+        exported = image_bytes(Image.new("RGB", (2200, 1600), "white"))
+    graphics["04_biarquetipos_activos.png"] = exported
+
+    fig_bi_time = plot_biarchetype_time(bi_time_weights)
+    exported = plotly_png_bytes(fig_bi_time, width=2200, height=1400, scale=2)
+    if exported is None:
+        exported = image_bytes(Image.new("RGB", (2200, 1400), "white"))
+    graphics["05_biarquetipos_temporales.png"] = exported
+
     plot_data = data.iloc[:, :min(8, data.shape[1])].dropna(how="all")
     fig_series = px.line(plot_data, title="Retornos logarítmicos")
     exported = plotly_png_bytes(fig_series, width=2200, height=1600, scale=2)
@@ -1245,7 +1259,7 @@ def build_graphics_zip_bytes(
                     draw.line(points, fill=colors_series[idx % len(colors_series)], width=4)
                 draw.text((140, 1290 + idx * 30), str(col), font=pil_font(20), fill=colors_series[idx % len(colors_series)])
         exported = image_bytes(image)
-    graphics["04_series_retornos.png"] = exported
+    graphics["06_series_retornos.png"] = exported
 
     output = BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -1517,6 +1531,8 @@ if st.sidebar.button("Descargar resultados"):
                 adj_r2=adj_r2,
                 distance_matrix=distance_matrix,
                 alpha_df=alpha_df,
+                bi_asset_weights=bi_asset_weights,
+                bi_time_weights=bi_time_weights,
                 cluster_df=cluster_df,
                 network_threshold=float(st.session_state.get("network_threshold", 0.42)),
             )
@@ -1585,13 +1601,6 @@ if active_tab == "2. Biarquetipos":
         fig_bi_time = plot_biarchetype_time(bi_time_weights)
         st.plotly_chart(fig_bi_time, width="stretch")
         st.dataframe(bi_time_weights.round(3), width="stretch")
-
-    st.info(
-        "Nota: esta pestaÃ±a implementa una aproximacion interpretable con "
-        "representantes extremos reales, no la optimizacion biarquetipica completa "
-        "del paper."
-    )
-
 
 # ============================================================
 # TAB 3: K-MEANS
