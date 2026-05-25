@@ -1,4 +1,6 @@
 import warnings
+import os
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +17,48 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
 
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
 warnings.filterwarnings("ignore")
+
+
+EXPECTED_DATA_FILES = (
+    "CSI_New_Energy_index.xlsx",
+    "ISE_Clean_Edge_Global_Wind_Energy_index.xlsx",
+    "S&P_Global_Clean_energy_index.xlsx",
+    "WilderHill.xlsx",
+    "DATA revisados Hui.xlsx",
+    "eurostat_bonos10.xlsx",
+)
+
+
+def has_expected_data_files(path: Path) -> bool:
+    return all((path / file_name).exists() for file_name in EXPECTED_DATA_FILES)
+
+
+def default_data_dir() -> str:
+    candidates = [
+        Path("data"),
+        Path.cwd() / "data",
+        Path("Datos"),
+        Path.cwd() / "Datos",
+        Path.cwd().parent / "Datos",
+        Path.cwd().parent,
+    ]
+
+    for candidate in candidates:
+        if has_expected_data_files(candidate):
+            return str(candidate)
+
+    return "data"
+
+
+def dataframe_to_excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, df in sheets.items():
+            df.to_excel(writer, sheet_name=sheet_name[:31])
+
+    return output.getvalue()
 
 
 # ============================================================
@@ -449,7 +492,7 @@ st.sidebar.header("Datos")
 
 data_dir = st.sidebar.text_input(
     "Carpeta con los Excels",
-    value="data"
+    value=default_data_dir()
 )
 
 bond_sheet = st.sidebar.selectbox(
@@ -485,6 +528,14 @@ except Exception as e:
 
 st.success(f"Dataset cargado: {data.shape[0]} fechas x {data.shape[1]} activos")
 
+date_min = data.index.min().strftime("%Y-%m")
+date_max = data.index.max().strftime("%Y-%m")
+summary_cols = st.columns(4)
+summary_cols[0].metric("Observaciones mensuales", f"{data.shape[0]}")
+summary_cols[1].metric("Activos disponibles", f"{data.shape[1]}")
+summary_cols[2].metric("Periodo", f"{date_min} / {date_max}")
+summary_cols[3].metric("Hoja de bonos", bond_sheet)
+
 if data.empty:
     st.error(
         "El dataset está vacío. Revisa que las fechas de los Excels se solapen "
@@ -515,6 +566,19 @@ data_scaled = pd.DataFrame(
     columns=data.columns
 )
 
+with st.expander("Configuracion del analisis"):
+    st.write(
+        {
+            "activos_seleccionados": len(selected_assets),
+            "escala_minima": min_scale,
+            "escala_maxima": max_scale,
+            "numero_escalas": n_scales,
+            "numero_arquetipos": n_archetypes,
+            "seleccion_k_automatica": auto_k,
+            "maximo_k": max_k if auto_k else manual_k,
+        }
+    )
+
 
 # ============================================================
 # CÁLCULO WAVELET
@@ -525,7 +589,7 @@ st.subheader("Matriz de coherencia wavelet")
 col_a, col_b = st.columns([1, 3])
 
 with col_a:
-    calculate = st.button("Calcular coherencia wavelet")
+    calculate = st.button("Recalcular coherencia wavelet")
 
 with col_b:
     st.info(
@@ -533,16 +597,29 @@ with col_b:
         "R² para cada par de activos."
     )
 
-if calculate:
+analysis_signature = {
+    "assets": tuple(data_scaled.columns),
+    "start": str(data_scaled.index.min()),
+    "end": str(data_scaled.index.max()),
+    "min_scale": min_scale,
+    "max_scale": max_scale,
+    "n_scales": n_scales,
+}
+
+needs_calculation = (
+    calculate
+    or "adj_r2" not in st.session_state
+    or st.session_state.get("analysis_signature") != analysis_signature
+)
+
+if needs_calculation:
     st.session_state["adj_r2"] = compute_wavelet_coherence_matrix(
         data_scaled,
         min_scale=min_scale,
         max_scale=max_scale,
         n_scales=n_scales
     )
-
-if "adj_r2" not in st.session_state:
-    st.stop()
+    st.session_state["analysis_signature"] = analysis_signature
 
 adj_r2 = st.session_state["adj_r2"]
 distance_matrix = compute_distance_matrix(adj_r2)
@@ -552,11 +629,12 @@ distance_matrix = compute_distance_matrix(adj_r2)
 # TABS
 # ============================================================
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "1. Arquetipos",
     "2. K-Means",
     "3. Matrices",
-    "4. Series"
+    "4. Series",
+    "5. Exportar"
 ])
 
 
@@ -573,7 +651,7 @@ with tab1:
 
     with col1:
         fig = plot_archetypes(alpha_df)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with col2:
         st.subheader("Pesos α")
@@ -609,7 +687,7 @@ with tab2:
             markers=True,
             title="Selección de k por silhouette"
         )
-        st.plotly_chart(fig_score, use_container_width=True)
+        st.plotly_chart(fig_score, width="stretch")
 
     else:
         k = manual_k
@@ -617,7 +695,7 @@ with tab2:
     labels = fit_kmeans(distance_matrix, k)
 
     fig_km = plot_kmeans_mds(distance_matrix, labels)
-    st.plotly_chart(fig_km, use_container_width=True)
+    st.plotly_chart(fig_km, width="stretch")
 
     cluster_df = pd.DataFrame({
         "Activo": distance_matrix.index,
@@ -651,7 +729,7 @@ with tab3:
             text_auto=".2f",
             title="Heatmap de coherencia wavelet"
         )
-        st.plotly_chart(fig_heat, use_container_width=True)
+        st.plotly_chart(fig_heat, width="stretch")
 
     with col2:
         st.subheader("Distancia = 1 - adj_R2")
@@ -662,7 +740,7 @@ with tab3:
             text_auto=".2f",
             title="Heatmap de distancia wavelet"
         )
-        st.plotly_chart(fig_dist, use_container_width=True)
+        st.plotly_chart(fig_dist, width="stretch")
 
 
 # ============================================================
@@ -683,4 +761,43 @@ with tab4:
             data[assets_to_plot],
             title="Retornos logarítmicos"
         )
-        st.plotly_chart(fig_series, use_container_width=True)
+        st.plotly_chart(fig_series, width="stretch")
+
+
+# ============================================================
+# TAB 5: EXPORTAR
+# ============================================================
+
+with tab5:
+    st.header("Exportar resultados")
+
+    export_sheets = {
+        "retornos_log": data,
+        "coherencia_adj_R2": adj_r2,
+        "distancia_wavelet": distance_matrix,
+        "pesos_arquetipos": alpha_df,
+        "clusters": cluster_df.set_index("Activo"),
+        "resumen_clusters": resumen.set_index("Cluster"),
+    }
+
+    if auto_k:
+        export_sheets["silhouette_k"] = scores_df.set_index("k")
+
+    st.download_button(
+        "Descargar resultados en Excel",
+        data=dataframe_to_excel_bytes(export_sheets),
+        file_name="wavelet_analysis_resultados.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    st.download_button(
+        "Descargar matriz adj_R2 en CSV",
+        data=adj_r2.to_csv().encode("utf-8"),
+        file_name="wavelet_adj_R2.csv",
+        mime="text/csv",
+    )
+
+    st.caption(
+        "Estos archivos sirven como evidencia reproducible para anexos, "
+        "revision metodologica o comparaciones posteriores."
+    )

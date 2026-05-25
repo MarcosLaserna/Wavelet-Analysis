@@ -1,0 +1,138 @@
+---
+title: "Pruebas con wavScalogram"
+author: "Marcos Laserna Moratalla"
+date: "06-12-2025"
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+    latex_engine: xelatex
+header-includes:
+  - \usepackage{geometry}
+  - \geometry{top=2cm, bottom=2cm, left=1.5cm, right=1.5cm}
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+library(wavScalogram)
+library(quantmod)
+library(zoo)
+
+```
+
+# Windowed Scalogram Difference
+
+## Procesamiento de datos
+
+```{r datos}
+
+getSymbols(c("SPY", "QQQ", "GLD"), from = "2021-01-01", to = "2024-12-31", src = "yahoo")
+
+# Rendimientos
+r_spy <- as.numeric(diff(log(Cl(SPY)))[-1])
+r_qqq <- as.numeric(diff(log(Cl(QQQ)))[-1])
+r_gld <- as.numeric(diff(log(Cl(GLD)))[-1])
+```
+## Gráficos
+
+```{r wsd 1}
+wsd_corr <- wsd(r_spy, 
+                r_qqq, 
+                dt = 1, 
+                windowrad = 30,
+                rdist = 10,
+                energy_density = TRUE, 
+                makefigure = TRUE,
+                main = "SP500 - Nasdaq 100")
+
+
+cor_1 <- cor(r_spy, r_qqq)
+
+
+p_1 <- rollapply(cbind(r_spy, r_qqq), 
+                      width = 60, 
+                      function(x) cor(x[,1], x[,2]), 
+                      by.column = FALSE, align = "center", fill = NA)
+
+plot(p_1, type = "l", col = "red",
+     main = "Pearson",
+     ylab = "Correlación", xlab = "Tiempo")
+abline(h = cor_1, col = "blue")
+```
+
+```{r wsd 2}
+wsd_self <- wsd(r_spy, 
+                r_spy + rnorm(length(r_spy), sd = 1e-10), 
+                dt = 1, 
+                windowrad = 30, 
+                makefigure = TRUE,
+                main = "SP500 consigo mismo")
+
+a <- r_spy
+b <- r_spy + rnorm(length(r_spy), sd = 1e-10)
+
+
+p_2 <- rollapply(cbind(a, b), 
+                           width = 60, 
+                           function(x) cor(x[,1], x[,2]), 
+                           by.column = FALSE, align = "center", fill = NA)
+
+plot(p_2, type = "l", col = "blue", ylim = c(0.9, 1.1),
+     main = "Pearson: SP500 - SP500",
+     ylab = "Correlación", xlab = "Tiempo")
+abline(h = 1, col = "red")
+```
+
+```{r wsd 3}
+wsd_3 <- wsd(r_spy, 
+               r_gld, 
+               dt = 1, 
+               windowrad = 30, 
+               rdist = 10, 
+               energy_density = TRUE, 
+               makefigure = TRUE,
+               main = "SP500 - Oro")
+               
+
+cor_3 <- cor(r_spy, r_gld, use = "complete.obs")
+
+p_3 <- rollapply(cbind(r_spy, r_gld), 
+                          width = 60, 
+                          function(x) cor(x[,1], x[,2]), 
+                          by.column = FALSE, align = "center", fill = NA)
+
+plot(p_3, type = "l", col = "blue",
+     main = "Pearson: SP 500 - Oro",
+     ylab = "Correlación", xlab = "Tiempo", ylim = c(-1, 1))
+abline(h = cor_3, col = "red")
+```
+
+# Índice de Escala
+
+```{r vis}
+
+par(mfrow = c(1, 3))
+
+
+tmp <- scale_index(signal = r_spy, dt = 1, 
+                   main = "SP 500", 
+                   xlab = "Escala (Días)")
+
+
+t <- 1:length(r_spy)
+sen <- sin(2 * pi * t / 20) + rnorm(length(t), sd = 0.01)
+tmp <- scale_index(signal = sen, dt = 1, 
+                   main = "Seno (T = 20)", 
+                   xlab = "Escala (Días)")
+
+
+recta <- 0.05 * t + 10
+tmp <- scale_index(signal = recta, dt = 1, 
+                   main = "i-scale: Recta (Tendencia)", 
+                   xlab = "Escala (Días)")
+
+par(mfrow = c(1, 1))
+```
+
+

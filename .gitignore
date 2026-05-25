@@ -1,12 +1,29 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
+.Python
+
+# Local environments and dependency caches
 .venv/
+.venv_app/
+.codex_deps/
+App Interactiva/.venv/
+App Interactiva/.venv_app/
+App Interactiva/.codex_deps/
 
-# Streamlit
+# Streamlit local secrets/logs
 .streamlit/secrets.toml
+*.log
+streamlit*.log
 
-# OS
+# Generated local outputs
+App Interactiva/outputs/
+outputs/
+
+# OS/editor noise
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,290 @@
+---
+title: "Implementación de Red de Interdependencia"
+author: "Marcos Laserna Moratalla"
+date: "27-12-2025"
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+    latex_engine: xelatex
+header-includes:
+  - \usepackage{geometry}
+  - \geometry{top=2cm, bottom=2cm, left=1.5cm, right=1.5cm}
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE, 
+  message = FALSE, 
+  fig.align = "center",
+  fig.width = 14,
+  fig.height = 11,
+  out.width = "100%",
+  dpi = 500
+)
+
+if(!require("showtext")) install.packages("showtext")
+library(showtext)
+font_add_google("Roboto", "roboto")
+showtext_auto()
+```
+
+
+```{r libraries, include=FALSE}
+pkgs <- c("quantmod", "igraph", "ggraph", "wavScalogram", "caTools", "ggplot2", "factoextra", "dplyr", "knitr")
+new_pkgs <- pkgs[!(pkgs %in% installed.packages()[,"Package"])]
+if(length(new_pkgs)) install.packages(new_pkgs)
+
+library(quantmod); library(igraph); library(ggraph); library(wavScalogram)
+library(caTools); library(ggplot2); library(factoextra); library(dplyr); library(knitr)
+```
+
+# Funciones de Correlación Wavelet
+
+```{r functions}
+fwav <- function(sig1, sig2, scales, dt = 1) {
+  x <- as.numeric(sig1); y <- as.numeric(sig2)
+  
+  # Transformada Wavelet
+  cwt_x_obj <- cwt_wst(x, dt = dt, scales = scales, wname = "MORLET", wparam = 6, 
+                       border_effects = "BE", makefigure = FALSE)
+  cwt_y_obj <- cwt_wst(y, dt = dt, scales = scales, wname = "MORLET", wparam = 6, 
+                       border_effects = "BE", makefigure = FALSE)
+  
+  # Transposición
+  cwt_x <- t(cwt_x_obj$coefs)
+  cwt_y <- t(cwt_y_obj$coefs)
+
+  # Cálculo de coeficientes del paper
+  S_Wxy <- cwt_x * Conj(cwt_y)
+  S_PowX <- Mod(cwt_x)^2
+  S_PowY <- Mod(cwt_y)^2
+  
+  # Suavizado S (preguntar duda sobre escala s, mi suavizado es lineal)
+  # porque son medias moviles
+  
+  for(k in 1:length(scales)) {
+    win <- round(3 * scales[k]); if(win < 1) win <- 1
+    S_Wxy[k, ]  <- caTools::runmean(S_Wxy[k, ], k = win, align = "center", endrule = "mean")
+    S_PowX[k, ] <- caTools::runmean(S_PowX[k, ], k = win, align = "center", endrule = "mean")
+    S_PowY[k, ] <- caTools::runmean(S_PowY[k, ], k = win, align = "center", endrule = "mean")
+  }
+  
+  # Parámetros
+  R2 <- (Mod(S_Wxy)^2) / (S_PowX * S_PowY + 1e-10)
+  Phi <- Arg(S_Wxy)
+  
+  return(list(R2 = R2, Phi = Phi))
+}
+```
+
+# Estudio de Bonos Verdes (2021-2024)
+
+## Procesamiento de datos
+
+```{r study1}
+
+map <- data.frame(
+  Paper_Name = c("GOLD", "GRNENEF", "GRNFUEL", "GRNGB", "GRNPOL", "GRNSOLAR", 
+                 "GRNTRN", "GRNWIND", "HYBOND", "IGBOND", "MSCI", "OIL", "SPGBI", "TREAS"),
+  Yahoo_Ticker = c("GC=F", "ICLN", "PLUG", "VNQ", "PBD", "TAN", "DRIV", "FAN", 
+                   "HYG", "LQD", "URTH", "CL=F", "BGRN", "IEF")
+)
+
+
+prices_list <- lapply(setNames(map$Yahoo_Ticker, map$Paper_Name), function(ticker) {
+  tryCatch({
+    tmp <- getSymbols(ticker, src = "yahoo", from = "2020-01-01",
+                      to = "2024-01-01", auto.assign = FALSE)
+    Ad(na.omit(tmp))
+  }, error = function(e) NULL)
+})
+
+# Limpieza y ajustes de nombres
+portfolio <- na.omit(do.call(merge, prices_list))
+colnames(portfolio) <- names(prices_list)
+
+
+returns <- diff(log(portfolio))[-1]
+data_mat <- scale(returns)
+fin <- colnames(data_mat)
+n <- ncol(data_mat)
+
+
+scales <- pow2scales(c(2, 128, 4)) 
+
+f_factor <- 1.033 
+
+# Mayor a un mes
+idx_band_c <- which(f_factor * scales > 30)
+
+# Obtenemos matrices de correlación wavelet
+adj_R2  <- matrix(0, n, n, dimnames = list(fin, fin))
+adj_Phi <- matrix(0, n, n, dimnames = list(fin, fin))
+
+for(i in 1:n) {
+  for(j in 1:n) {
+    if(i != j) {
+      res <- fwav(data_mat[,i], data_mat[,j], scales)
+      
+      adj_R2[i,j]  <- mean(res$R2[idx_band_c, ], na.rm = TRUE)
+      adj_Phi[i,j] <- mean(res$Phi[idx_band_c, ], na.rm = TRUE)
+    }
+  }
+}
+diag(adj_R2) <- 1
+```
+
+## Visualización de la Red
+
+```{r study1_net, fig.height=10, fig.width=12}
+
+threshold <- 0.42 
+edges <- data.frame(from=character(), to=character(), weight=numeric(), phase=numeric())
+for(i in 1:(n-1)) {
+  for(j in (i+1):n) {
+    w <- adj_R2[i,j]
+    if(!is.na(w) && w > threshold) {
+      edges <- rbind(edges, data.frame(from=fin[i],
+                                       to=fin[j], weight=w, phase=adj_Phi[i,j]))
+    }
+  }
+}
+
+net <- graph_from_data_frame(edges, vertices=fin, directed=TRUE)
+green_list <- c("SPGBI", "GRNENEF", "GRNFUEL", "GRNGB", "GRNPOL", "GRNSOLAR", "GRNTRN", "GRNWIND")
+V(net)$Sector <- ifelse(V(net)$name %in% green_list, "Green Assets", "Conventional")
+V(net)$Degree <- strength(net, mode="all"); V(net)$Degree[V(net)$Degree==0] <- 0.5
+
+set.seed(555) 
+layout <- create_layout(net, layout = "fr", niter=2000)
+
+ggraph(layout) +
+  geom_edge_link(aes(width = weight, alpha = weight), color = "black", 
+                 arrow = arrow(length = unit(4, 'mm')), end_cap = circle(5, 'mm')) +
+  scale_edge_width(range = c(0.8, 3), name="Pesos") +
+  scale_edge_alpha(range = c(0.2, 0.8), guide="none") +
+  geom_node_point(aes(color = Sector, size = Degree))+
+  scale_size(range = c(4, 14), guide = "none")+
+  scale_color_manual(values = c("Conventional" = "orange", "Green Assets" = "green")) +
+  geom_node_text(aes(label = name), repel=TRUE, fontface="bold", size=5, bg.color="white", bg.r=0.15) +
+  expand_limits(x = c(-1.5, 1.5), y = c(-1.5, 1.5)) +
+  theme_graph() +
+  theme(legend.position = "right", text = element_text(family = "roboto"))
+```
+
+# Estudio de Acciones Varias (2021-2024)
+
+## Procesamiento de datos
+
+```{r study2}
+map_2 <- data.frame(
+  Sector = c(rep("Tecnología", 5), rep("Crypto", 4), rep("Energía", 4), 
+             rep("Farmacéutica y Defensa", 5), rep("Índices", 5), rep("Divisas", 6)),
+  Yahoo_Ticker = c("NVDA", "MSFT", "AAPL", "GOOGL", "TSLA", "BTC-USD", "ETH-USD", 
+                   "SOL-USD", "BNB-USD", "XOM", "CVX", "BA", "CAT", "LLY", "JNJ", 
+                   "PFE", "MRK", "ABBV", "SPY", "QQQ", "^VIX", "GLD", "TLT", "UUP", 
+                   "EUR=X", "GBP=X", "JPY=X", "CHF=X", "AUD=X"),
+  Label = c("Nvidia", "Microsoft", "Apple", "Google", "Tesla", "Bitcoin", "Ethereum", 
+            "Solana", "Binance", "Exxon", "Chevron", "Boeing", "Caterpillar", "EliLilly", 
+            "J&J", "Pfizer", "Merck", "AbbVie", "S&P500", "Nasdaq", "VIX", "ORO", 
+            "Bonos20A", "Dolar(IDX)", "Euro", "Libra", "Yen", "FrancoSuizo", "AudDolar")
+)
+
+prices_list <- list()
+for(i in 1:nrow(map_2)){
+  tryCatch({
+    tmp <- getSymbols(map_2$Yahoo_Ticker[i], src="yahoo", 
+                      from="2021-01-01", to="2024-01-01", auto.assign=FALSE)
+    prices_list[[map_2$Label[i]]] <- Ad(na.omit(tmp))
+  }, error=function(e) NULL)
+}
+
+# Para que los nombres se vean bien
+portfolio_2 <- na.omit(do.call(merge, prices_list))
+colnames(portfolio_2) <- names(prices_list)
+
+data_2 <- scale(diff(log(portfolio_2))[-1])
+fin2 <- colnames(data_2)
+n_2  <- ncol(data_2)
+
+scales <- pow2scales(c(2, 128, 4))
+f_factor <- 1.033
+
+# Mínimo de un mes
+idx_band_c <- which(f_factor * scales > 30)
+
+# Calculo de matrices
+adj_R2_2 <- matrix(0, n_2, n_2, dimnames=list(fin2, fin2))
+adj_Phi_2 <- matrix(0, n_2, n_2, dimnames=list(fin2, fin2))
+
+for(i in 2:n_2) {
+  for(j in 1:(i-1)) {
+    res <- fwav(data_2[,i], data_2[,j], scales)
+    adj_R2_2[i,j] <- adj_R2_2[j,i] <- mean(res$R2[idx_band_c, ], na.rm=TRUE)
+    adj_Phi_2[i,j] <- mean(res$Phi[idx_band_c, ], na.rm=TRUE)
+    adj_Phi_2[j,i] <- -adj_Phi_2[i,j]
+  }
+}
+diag(adj_R2_2) <- 1
+```
+
+
+## Visualización de la Red
+
+```{r study2_net, fig.height=12, fig.width=14}
+
+threshold_2 <- 0.42
+
+edges_2 <- data.frame(from=character(), to=character(), weight=numeric())
+
+for(i in 1:(n_2-1)) {
+  for(j in (i+1):n_2) {
+    w <- adj_R2_2[i,j]
+    if(!is.na(w) && w > threshold_2) {
+      edges_2 <- rbind(edges_2, data.frame(from=fin2[i], to=fin2[j], weight=w))
+    }
+  }
+}
+
+net_2 <- graph_from_data_frame(edges_2, vertices=fin2, directed=TRUE)
+indices <- match(V(net_2)$name, map_2$Label)
+V(net_2)$Sector <- map_2$Sector[indices]
+V(net_2)$Degree <- strength(net_2, mode="all")
+
+
+set.seed(555)
+ggraph(net_2, layout = "fr") +
+  geom_edge_link(aes(width = weight, alpha = weight), color = "grey",
+                 arrow = arrow(length = unit(2, 'mm')), end_cap = circle(7, 'mm')) +
+  geom_node_point(aes(color = Sector, size = Degree)) +
+  
+scale_edge_width(range = c(0.2, 0.8), name = "Pesos") +
+scale_edge_alpha(range = c(0.2, 0.8), guide = "none") +
+scale_size(range = c(9, 18), guide = "none") +
+
+  geom_node_text(aes(label = name), repel=TRUE, fontface="bold", size=3.5) +
+  theme_graph() +
+  scale_color_manual(values = c("Tecnología"="blue", "Crypto"="red", "Energía"="green",
+                                
+                                "Farmacéutica y Defensa"="purple", "Índices"="darkgrey", "Divisas"="orange"))
+```
+# Dendrograma
+
+
+```{r study2_dendro, fig.height=10, fig.width=10}
+
+dist_matrix_2 <- as.dist(1 - adj_R2_2)
+hc_macro <- hclust(dist_matrix_2, method = "ward.D2")
+
+colores_clusters <- c("red", "blue", "green", "purple", "orange")
+
+fviz_dend(hc_macro, k = 5, cex = 0.8, 
+          k_colors = colores_clusters,
+          type = "circular", rect = TRUE, 
+          main = "Clusters Estratégicos Detectados") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", family="roboto")) +
+  theme(legend.position = "none")
+```

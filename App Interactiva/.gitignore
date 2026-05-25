@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.codex_deps/
+streamlit*.log
+app_*_test.png
+outputs/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
