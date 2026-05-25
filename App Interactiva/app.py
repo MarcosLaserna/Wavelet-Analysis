@@ -1399,19 +1399,33 @@ node_summary = pd.DataFrame({
     "Degree": degree.values,
 }).sort_values("Degree", ascending=False)
 
-st.sidebar.download_button(
-    "Descargar resultados",
-    data=build_graphics_zip_bytes(
-        data=data,
-        adj_r2=adj_r2,
-        distance_matrix=distance_matrix,
-        alpha_df=alpha_df,
-        cluster_df=cluster_df,
-        network_threshold=float(st.session_state.get("network_threshold", 0.42)),
-    ),
-    file_name="wavelet_graficos_resultados.zip",
-    mime="application/zip",
+download_signature = (
+    st.session_state.get("analysis_signature"),
+    float(st.session_state.get("network_threshold", 0.42)),
 )
+if st.session_state.get("graphics_zip_signature") != download_signature:
+    st.session_state.pop("graphics_zip", None)
+
+if st.sidebar.button("Descargar resultados"):
+    with st.sidebar:
+        with st.spinner("Preparando gráficos..."):
+            st.session_state["graphics_zip"] = build_graphics_zip_bytes(
+                data=data,
+                adj_r2=adj_r2,
+                distance_matrix=distance_matrix,
+                alpha_df=alpha_df,
+                cluster_df=cluster_df,
+                network_threshold=float(st.session_state.get("network_threshold", 0.42)),
+            )
+            st.session_state["graphics_zip_signature"] = download_signature
+
+if "graphics_zip" in st.session_state:
+    st.sidebar.download_button(
+        "Guardar ZIP",
+        data=st.session_state["graphics_zip"],
+        file_name="wavelet_graficos_resultados.zip",
+        mime="application/zip",
+    )
 
 
 # ============================================================
