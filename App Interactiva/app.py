@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pywt
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from scipy.ndimage import uniform_filter
@@ -347,6 +348,226 @@ def compute_distance_matrix(adj_r2: pd.DataFrame):
 
 
 # ============================================================
+# RED DE INTERDEPENDENCIA
+# ============================================================
+
+def classify_asset_sector(asset_name: str) -> str:
+    green_assets = {
+        "CSI_China",
+        "Wind",
+        "SP_Clean",
+        "WilderHill",
+        "Solar",
+        "Uranium",
+        "FTSE_Env",
+        "ERIXP_EU",
+    }
+    return "Green Assets" if asset_name in green_assets else "Conventional"
+
+
+def build_network_edges(adj_r2: pd.DataFrame, threshold: float):
+    rows = []
+    assets = list(adj_r2.index)
+
+    for i in range(len(assets) - 1):
+        for j in range(i + 1, len(assets)):
+            weight = float(adj_r2.iloc[i, j])
+            if not np.isnan(weight) and weight > threshold:
+                rows.append({
+                    "from": assets[i],
+                    "to": assets[j],
+                    "weight": weight,
+                })
+
+    return pd.DataFrame(rows, columns=["from", "to", "weight"])
+
+
+def weighted_degree(edges_df: pd.DataFrame, assets: list[str]):
+    degree = pd.Series(0.0, index=assets)
+
+    for _, edge in edges_df.iterrows():
+        degree.loc[edge["from"]] += edge["weight"]
+        degree.loc[edge["to"]] += edge["weight"]
+
+    return degree.replace(0, 0.5)
+
+
+def force_layout(assets: list[str], edges_df: pd.DataFrame, seed: int = 555):
+    """
+    Layout de fuerzas reproducible inspirado en Fruchterman-Reingold.
+    Evita añadir networkx como dependencia solo para esta visualizacion.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(assets)
+
+    if n == 1:
+        return {assets[0]: np.array([0.0, 0.0])}
+
+    positions = rng.uniform(-1.0, 1.0, size=(n, 2))
+    index = {asset: idx for idx, asset in enumerate(assets)}
+    area = 4.0
+    k = np.sqrt(area / n)
+    temperature = 0.45
+
+    edge_pairs = [
+        (index[row["from"]], index[row["to"]], float(row["weight"]))
+        for _, row in edges_df.iterrows()
+        if row["from"] in index and row["to"] in index
+    ]
+
+    for _ in range(450):
+        disp = np.zeros_like(positions)
+
+        for i in range(n):
+            delta = positions[i] - positions
+            distance = np.linalg.norm(delta, axis=1) + 1e-9
+            force = (k * k / distance)[:, None] * delta / distance[:, None]
+            force[i] = 0
+            disp[i] += force.sum(axis=0)
+
+        for source, target, weight in edge_pairs:
+            delta = positions[source] - positions[target]
+            distance = np.linalg.norm(delta) + 1e-9
+            force = (distance * distance / k) * (0.45 + weight)
+            vector = (delta / distance) * force
+            disp[source] -= vector
+            disp[target] += vector
+
+        lengths = np.linalg.norm(disp, axis=1) + 1e-9
+        positions += (disp / lengths[:, None]) * np.minimum(lengths, temperature)[:, None]
+        positions -= positions.mean(axis=0)
+        temperature *= 0.992
+
+    max_abs = np.abs(positions).max()
+    if max_abs > 0:
+        positions = positions / max_abs
+
+    return {asset: positions[index[asset]] for asset in assets}
+
+
+def plot_wavelet_network(adj_r2: pd.DataFrame, threshold: float = 0.42):
+    assets = list(adj_r2.index)
+    edges_df = build_network_edges(adj_r2, threshold)
+    degree = weighted_degree(edges_df, assets)
+    positions = force_layout(assets, edges_df)
+
+    sector_colors = {
+        "Green Assets": "green",
+        "Conventional": "orange",
+    }
+
+    fig = go.Figure()
+
+    if not edges_df.empty:
+        min_weight = edges_df["weight"].min()
+        max_weight = edges_df["weight"].max()
+    else:
+        min_weight = max_weight = threshold
+
+    for _, edge in edges_df.iterrows():
+        x0, y0 = positions[edge["from"]]
+        x1, y1 = positions[edge["to"]]
+        weight = float(edge["weight"])
+        scaled = (weight - min_weight) / (max_weight - min_weight + 1e-9)
+        width = 0.8 + 2.2 * scaled
+        alpha = 0.25 + 0.55 * scaled
+
+        fig.add_trace(go.Scatter(
+            x=[x0, x1],
+            y=[y0, y1],
+            mode="lines",
+            line=dict(width=width, color=f"rgba(0, 0, 0, {alpha:.2f})"),
+            hoverinfo="text",
+            text=f"{edge['from']} → {edge['to']}<br>adj_R2={weight:.3f}",
+            showlegend=False,
+        ))
+
+        dx = x1 - x0
+        dy = y1 - y0
+        shrink = 0.08
+        fig.add_annotation(
+            x=x1 - shrink * dx,
+            y=y1 - shrink * dy,
+            ax=x0 + shrink * dx,
+            ay=y0 + shrink * dy,
+            xref="x",
+            yref="y",
+            axref="x",
+            ayref="y",
+            showarrow=True,
+            arrowhead=3,
+            arrowsize=1.2,
+            arrowwidth=width,
+            arrowcolor=f"rgba(0, 0, 0, {alpha:.2f})",
+            opacity=alpha,
+        )
+
+    node_x = []
+    node_y = []
+    node_color = []
+    node_size = []
+    node_text = []
+    hover_text = []
+
+    min_degree = float(degree.min())
+    max_degree = float(degree.max())
+
+    for asset in assets:
+        x, y = positions[asset]
+        sector = classify_asset_sector(asset)
+        deg = float(degree.loc[asset])
+        scaled_degree = (deg - min_degree) / (max_degree - min_degree + 1e-9)
+
+        node_x.append(x)
+        node_y.append(y)
+        node_color.append(sector_colors[sector])
+        node_size.append(14 + 28 * scaled_degree)
+        node_text.append(asset)
+        hover_text.append(
+            f"{asset}<br>Sector: {sector}<br>Fuerza ponderada: {deg:.3f}"
+        )
+
+    fig.add_trace(go.Scatter(
+        x=node_x,
+        y=node_y,
+        mode="markers+text",
+        marker=dict(
+            size=node_size,
+            color=node_color,
+            line=dict(width=1.5, color="black"),
+            opacity=0.92,
+        ),
+        text=node_text,
+        textposition="top center",
+        textfont=dict(size=12, color="black"),
+        hovertext=hover_text,
+        hoverinfo="text",
+        showlegend=False,
+    ))
+
+    for sector, color in sector_colors.items():
+        fig.add_trace(go.Scatter(
+            x=[None],
+            y=[None],
+            mode="markers",
+            marker=dict(size=14, color=color, line=dict(width=1, color="black")),
+            name=sector,
+        ))
+
+    fig.update_layout(
+        title="Red de interdependencia wavelet",
+        height=760,
+        xaxis=dict(visible=False, range=[-1.25, 1.25]),
+        yaxis=dict(visible=False, range=[-1.25, 1.25]),
+        plot_bgcolor="white",
+        margin=dict(l=10, r=10, t=60, b=10),
+        legend=dict(orientation="v", x=1.02, y=0.95),
+    )
+
+    return fig, edges_df, degree
+
+
+# ============================================================
 # ARQUETIPOS
 # ============================================================
 
@@ -629,12 +850,13 @@ distance_matrix = compute_distance_matrix(adj_r2)
 # TABS
 # ============================================================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "1. Arquetipos",
     "2. K-Means",
     "3. Matrices",
-    "4. Series",
-    "5. Exportar"
+    "4. Red",
+    "5. Series",
+    "6. Exportar"
 ])
 
 
@@ -744,10 +966,61 @@ with tab3:
 
 
 # ============================================================
-# TAB 4: SERIES
+# TAB 4: RED
 # ============================================================
 
 with tab4:
+    st.header("Red de interdependencia wavelet")
+
+    network_threshold = st.slider(
+        "Umbral de coherencia para dibujar aristas",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.42,
+        step=0.01,
+        help=(
+            "Replica el criterio de la Tercera Reunion: se dibuja una arista "
+            "cuando adj_R2 supera el umbral."
+        ),
+    )
+
+    fig_network, edges_df, degree = plot_wavelet_network(
+        adj_r2,
+        threshold=network_threshold,
+    )
+
+    st.plotly_chart(fig_network, width="stretch")
+
+    col_edges, col_nodes = st.columns(2)
+
+    with col_edges:
+        st.subheader("Aristas filtradas")
+        st.dataframe(
+            edges_df.sort_values("weight", ascending=False).round(3),
+            width="stretch",
+        )
+
+    with col_nodes:
+        st.subheader("Fuerza ponderada por activo")
+        node_summary = pd.DataFrame({
+            "Activo": degree.index,
+            "Sector": [classify_asset_sector(asset) for asset in degree.index],
+            "Degree": degree.values,
+        }).sort_values("Degree", ascending=False)
+        st.dataframe(node_summary.round(3), width="stretch")
+
+    st.caption(
+        "Estilo basado en la seccion 2.2 de Tercera Reunion: layout de fuerzas, "
+        "aristas ponderadas por coherencia, flechas, nodos verdes para activos "
+        "verdes y naranjas para convencionales."
+    )
+
+
+# ============================================================
+# TAB 5: SERIES
+# ============================================================
+
+with tab5:
     st.header("Series de retornos logarítmicos")
 
     assets_to_plot = st.multiselect(
@@ -765,10 +1038,10 @@ with tab4:
 
 
 # ============================================================
-# TAB 5: EXPORTAR
+# TAB 6: EXPORTAR
 # ============================================================
 
-with tab5:
+with tab6:
     st.header("Exportar resultados")
 
     export_sheets = {
@@ -778,6 +1051,8 @@ with tab5:
         "pesos_arquetipos": alpha_df,
         "clusters": cluster_df.set_index("Activo"),
         "resumen_clusters": resumen.set_index("Cluster"),
+        "red_aristas": edges_df.set_index(["from", "to"]) if not edges_df.empty else edges_df,
+        "red_nodos": node_summary.set_index("Activo"),
     }
 
     if auto_k:

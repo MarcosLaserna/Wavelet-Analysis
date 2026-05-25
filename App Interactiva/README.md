@@ -6,6 +6,8 @@ Aplicación interactiva en **Streamlit** para:
 - Construir matriz de distancia `1 - adj_R2`.
 - Estimar **arquetipos** (aproximación con NMF).
 - Ejecutar **clustering K-Means** con selección automática de `k` por silhouette.
+- Visualizar una **red de interdependencia wavelet** inspirada en la seccion
+  2.2 de `Tercera Reunion`.
 - Visualizar resultados con **Plotly** (ternary, MDS, heatmaps y series temporales).
 
 ---
@@ -87,7 +89,7 @@ es la organizacion recomendada para este workspace.
 5. Genera:
    - Arquetipos (NMF)
    - Clustering K-Means
-   - Matrices y series
+   - Matrices, red de interdependencia y series
 
 ---
 

@@ -17,8 +17,9 @@ def main() -> None:
         "1. Arquetipos",
         "2. K-Means",
         "3. Matrices",
-        "4. Series",
-        "5. Exportar",
+        "4. Red",
+        "5. Series",
+        "6. Exportar",
     }
     rendered_tabs = {tab.label for tab in app.tabs}
 
