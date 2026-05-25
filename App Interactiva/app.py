@@ -830,6 +830,102 @@ def plot_archetypes(alpha_df: pd.DataFrame):
     return fig
 
 
+def select_extreme_representatives(distance_matrix: pd.DataFrame, n_components: int):
+    assets = list(distance_matrix.index)
+    n_components = min(n_components, len(assets))
+    dist = distance_matrix.to_numpy(copy=True)
+    np.fill_diagonal(dist, 0.0)
+
+    selected = [int(np.argmax(dist.mean(axis=1)))]
+    while len(selected) < n_components:
+        min_dist = dist[:, selected].min(axis=1)
+        min_dist[selected] = -1
+        selected.append(int(np.argmax(min_dist)))
+
+    return selected
+
+
+def convex_weights_from_distance(distance_matrix: pd.DataFrame, selected_indices: list[int], prefix: str):
+    dist = distance_matrix.to_numpy(copy=True)
+    scores = 1 / (dist[:, selected_indices] + 1e-6)
+    weights = scores / (scores.sum(axis=1, keepdims=True) + 1e-12)
+
+    for pos, idx in enumerate(selected_indices):
+        weights[idx, :] = 0
+        weights[idx, pos] = 1
+
+    selected_names = [str(distance_matrix.index[idx]) for idx in selected_indices]
+    return pd.DataFrame(
+        weights,
+        index=distance_matrix.index,
+        columns=[f"{prefix} {i + 1}: {name}" for i, name in enumerate(selected_names)],
+    )
+
+
+def compute_time_distance(data: pd.DataFrame):
+    complete = data.copy()
+    complete = complete.apply(lambda col: col.fillna(col.mean()), axis=0).fillna(0.0)
+    values = complete.to_numpy(dtype=float)
+    values = (values - values.mean(axis=0, keepdims=True)) / (values.std(axis=0, keepdims=True) + 1e-9)
+
+    diff = values[:, None, :] - values[None, :, :]
+    distances = np.sqrt(np.mean(diff * diff, axis=2))
+    labels = pd.Index([idx.strftime("%Y-%m") for idx in complete.index], name="Fecha")
+    return pd.DataFrame(distances, index=labels, columns=labels)
+
+
+@st.cache_data
+def fit_biarchetype_proxy(data: pd.DataFrame, distance_matrix: pd.DataFrame, n_components: int):
+    asset_selected = select_extreme_representatives(distance_matrix, n_components)
+    asset_weights = convex_weights_from_distance(
+        distance_matrix,
+        asset_selected,
+        prefix="Biarquetipo activo",
+    )
+
+    time_distance = compute_time_distance(data)
+    time_selected = select_extreme_representatives(time_distance, n_components)
+    time_weights = convex_weights_from_distance(
+        time_distance,
+        time_selected,
+        prefix="Biarquetipo temporal",
+    )
+
+    return asset_weights, time_weights, time_distance
+
+
+def plot_biarchetype_assets(asset_weights: pd.DataFrame):
+    long_df = (
+        asset_weights.reset_index(names="Activo")
+        .melt(id_vars="Activo", var_name="Biarquetipo", value_name="Peso")
+    )
+    fig = px.bar(
+        long_df,
+        x="Activo",
+        y="Peso",
+        color="Biarquetipo",
+        barmode="stack",
+        title="Composicion de activos por biarquetipos",
+    )
+    fig.update_layout(height=650, xaxis_tickangle=-60)
+    return fig
+
+
+def plot_biarchetype_time(time_weights: pd.DataFrame):
+    plot_df = time_weights.copy()
+    plot_df["Fecha"] = pd.to_datetime(plot_df.index)
+    long_df = plot_df.melt(id_vars="Fecha", var_name="Biarquetipo", value_name="Peso")
+    fig = px.area(
+        long_df,
+        x="Fecha",
+        y="Peso",
+        color="Biarquetipo",
+        title="Composicion temporal por biarquetipos",
+    )
+    fig.update_layout(height=520, yaxis_range=[0, 1])
+    return fig
+
+
 # ============================================================
 # K-MEANS
 # ============================================================
@@ -1356,11 +1452,12 @@ distance_matrix = compute_distance_matrix(adj_r2)
 
 TAB_LABELS = [
     "1. Arquetipoides",
-    "2. K-Means",
-    "3. Matrices",
-    "4. Red",
-    "5. Series",
-    "6. Exportar"
+    "2. Biarquetipos",
+    "3. K-Means",
+    "4. Matrices",
+    "5. Red",
+    "6. Series",
+    "7. Exportar"
 ]
 
 if st.session_state.get("active_tab") not in TAB_LABELS:
@@ -1389,6 +1486,12 @@ cluster_df = pd.DataFrame({
     "Cluster": labels + 1
 }).sort_values("Cluster")
 resumen = cluster_df.groupby("Cluster")["Activo"].apply(list).reset_index()
+
+bi_asset_weights, bi_time_weights, bi_time_distance = fit_biarchetype_proxy(
+    data,
+    distance_matrix,
+    n_archetypes,
+)
 
 network_threshold = st.session_state.get("network_threshold", 0.42)
 edges_df = build_network_edges(adj_r2, network_threshold)
@@ -1458,10 +1561,43 @@ if active_tab == "1. Arquetipoides":
 
 
 # ============================================================
-# TAB 2: K-MEANS
+# TAB 2: BIARQUETIPOS
 # ============================================================
 
-if active_tab == "2. K-Means":
+if active_tab == "2. Biarquetipos":
+    st.header("Biarquetipos: activos y regÃ­menes temporales")
+
+    st.caption(
+        "Lectura exploratoria inspirada en biarchetype analysis: se buscan extremos "
+        "representativos en la dimension de activos y en la dimension temporal."
+    )
+
+    col_assets, col_time = st.columns([1, 1])
+
+    with col_assets:
+        st.subheader("Pesos por activo")
+        fig_bi_assets = plot_biarchetype_assets(bi_asset_weights)
+        st.plotly_chart(fig_bi_assets, width="stretch")
+        st.dataframe(bi_asset_weights.round(3), width="stretch")
+
+    with col_time:
+        st.subheader("Pesos por periodo")
+        fig_bi_time = plot_biarchetype_time(bi_time_weights)
+        st.plotly_chart(fig_bi_time, width="stretch")
+        st.dataframe(bi_time_weights.round(3), width="stretch")
+
+    st.info(
+        "Nota: esta pestaÃ±a implementa una aproximacion interpretable con "
+        "representantes extremos reales, no la optimizacion biarquetipica completa "
+        "del paper."
+    )
+
+
+# ============================================================
+# TAB 3: K-MEANS
+# ============================================================
+
+if active_tab == "3. K-Means":
     st.header("Clustering K-Means")
 
     if auto_k:
@@ -1502,10 +1638,10 @@ if active_tab == "2. K-Means":
 
 
 # ============================================================
-# TAB 3: MATRICES
+# TAB 4: MATRICES
 # ============================================================
 
-if active_tab == "3. Matrices":
+if active_tab == "4. Matrices":
     st.header("Matrices")
 
     col1, col2 = st.columns(2)
@@ -1534,10 +1670,10 @@ if active_tab == "3. Matrices":
 
 
 # ============================================================
-# TAB 4: RED
+# TAB 5: RED
 # ============================================================
 
-if active_tab == "4. Red":
+if active_tab == "5. Red":
     st.header("Red de interdependencia wavelet")
 
     network_threshold = st.slider(
@@ -1592,10 +1728,10 @@ if active_tab == "4. Red":
 
 
 # ============================================================
-# TAB 5: SERIES
+# TAB 6: SERIES
 # ============================================================
 
-if active_tab == "5. Series":
+if active_tab == "6. Series":
     st.header("Series de retornos logarítmicos")
 
     assets_to_plot = st.multiselect(
@@ -1613,10 +1749,10 @@ if active_tab == "5. Series":
 
 
 # ============================================================
-# TAB 6: EXPORTAR
+# TAB 7: EXPORTAR
 # ============================================================
 
-if active_tab == "6. Exportar":
+if active_tab == "7. Exportar":
     st.header("Exportar resultados")
 
     export_sheets = {
@@ -1624,6 +1760,8 @@ if active_tab == "6. Exportar":
         "coherencia_adj_R2": adj_r2,
         "distancia_wavelet": distance_matrix,
         "pesos_arquetipoides": alpha_df,
+        "biarquetipos_activos": bi_asset_weights,
+        "biarquetipos_temporales": bi_time_weights,
         "clusters": cluster_df.set_index("Activo"),
         "resumen_clusters": resumen.set_index("Cluster"),
         "red_aristas": edges_df.set_index(["from", "to"]) if not edges_df.empty else edges_df,

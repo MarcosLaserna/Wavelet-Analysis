@@ -20,11 +20,12 @@ def main() -> None:
 
     expected_views = {
         "1. Arquetipoides",
-        "2. K-Means",
-        "3. Matrices",
-        "4. Red",
-        "5. Series",
-        "6. Exportar",
+        "2. Biarquetipos",
+        "3. K-Means",
+        "4. Matrices",
+        "5. Red",
+        "6. Series",
+        "7. Exportar",
     }
     rendered_views = set(app.radio[0].options)
 
@@ -32,12 +33,12 @@ def main() -> None:
         missing = expected_views - rendered_views
         raise AssertionError(f"Missing views after automatic calculation: {sorted(missing)}")
 
-    app.radio[0].set_value("4. Red")
+    app.radio[0].set_value("5. Red")
     app.run(timeout=120)
     app.slider[0].set_value(0.55)
     app.run(timeout=120)
 
-    if app.radio[0].value != "4. Red":
+    if app.radio[0].value != "5. Red":
         raise AssertionError("Network view did not remain selected after rerun")
 
     if "7. Presentación" in app.radio[0].options:
