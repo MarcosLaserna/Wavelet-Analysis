@@ -69,12 +69,12 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
 if errorlevel 1 (
     echo Instalando dependencias de la app...
     "%VENV_DIR%\Scripts\python.exe" -m pip install --upgrade pip
-    "%VENV_DIR%\Scripts\python.exe" -m pip install -r requirements.txt
+    "%VENV_DIR%\Scripts\python.exe" -m pip install -r "%ROOT%requirements.txt"
     if errorlevel 1 (
         echo.
         echo ERROR: No se han podido instalar las dependencias.
         echo Revisa la conexion a internet o ejecuta manualmente:
-        echo "%VENV_DIR%\Scripts\python.exe" -m pip install -r requirements.txt
+        echo "%VENV_DIR%\Scripts\python.exe" -m pip install -r "%ROOT%requirements.txt"
         echo.
         pause
         exit /b 1
