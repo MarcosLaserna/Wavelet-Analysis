@@ -1665,7 +1665,7 @@ if active_tab == "1. Arquetipoides":
 # ============================================================
 
 if active_tab == "2. Biarquetipos":
-    st.header("Biarquetipos: activos y regÃ­menes temporales")
+    st.header("Biarquetipos: activos y regimenes temporales")
 
     st.caption(
         "Biarchetype Analysis formal sobre la matriz activo-tiempo de retornos: "
