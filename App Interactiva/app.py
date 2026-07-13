@@ -12,9 +12,9 @@ import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 
+from archetypes import ADA, BiAA
 from scipy.ndimage import uniform_filter
 from sklearn.cluster import KMeans
-from sklearn.decomposition import NMF
 from sklearn.manifold import MDS
 from sklearn.metrics import silhouette_score
 
@@ -33,6 +33,10 @@ EXPECTED_DATA_FILES = (
 )
 
 
+def has_final_data_file(path: Path) -> bool:
+    return (path / "datos_final.xlsx").exists()
+
+
 def has_expected_data_files(path: Path) -> bool:
     return all((path / file_name).exists() for file_name in EXPECTED_DATA_FILES)
 
@@ -48,7 +52,7 @@ def default_data_dir() -> str:
     ]
 
     for candidate in candidates:
-        if has_expected_data_files(candidate):
+        if has_final_data_file(candidate) or has_expected_data_files(candidate):
             return str(candidate)
 
     return "data"
@@ -240,9 +244,40 @@ def read_yahoo_assets(path):
     return returns, metadata
 
 
+def read_final_dataset(path):
+    df = pd.read_excel(path)
+
+    date_col = "Fechas" if "Fechas" in df.columns else df.columns[0]
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df.dropna(subset=[date_col]).set_index(date_col).sort_index()
+
+    drop_cols = [col for col in ["N"] if col in df.columns]
+    df = df.drop(columns=drop_cols, errors="ignore")
+
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(axis=1, how="all")
+    monthly = df.resample("ME").last()
+    monthly = to_month_index(monthly)
+
+    returns = np.log(monthly / monthly.shift(1))
+    returns = returns.replace([np.inf, -np.inf], np.nan)
+    returns = returns.dropna(how="all")
+    returns = returns.dropna(axis=1, how="all")
+    returns = returns.loc[:, returns.std(skipna=True) > 0]
+    returns = to_month_index(returns)
+
+    return returns
+
+
 @st.cache_data
 def build_dataset(data_dir: str, bond_sheet: str):
     data_dir = Path(data_dir)
+
+    final_path = data_dir / "datos_final.xlsx"
+    if final_path.exists():
+        return read_final_dataset(final_path)
 
     files = {
         "CSI_China": data_dir / "CSI_New_Energy_index.xlsx",
@@ -303,7 +338,12 @@ def build_asset_catalog(data_dir: str, columns: tuple[str, ...]):
     }
 
     for asset in columns:
-        group, sector, source = base_groups.get(asset, ("Bonos Eurostat", "Bonos", "Excel"))
+        if asset in base_groups:
+            group, sector, source = base_groups[asset]
+        elif asset.isupper() and len(asset) <= 4:
+            group, sector, source = ("Bonos Eurostat", "Bonos", "Excel")
+        else:
+            group, sector, source = ("Acciones renovables", "Green Assets", "datos_final.xlsx")
         rows.append({
             "Activo": asset,
             "Grupo": group,
@@ -762,32 +802,39 @@ def plot_wavelet_network(adj_r2: pd.DataFrame, threshold: float = 0.42):
 
 def fit_archetype_proxy(adj_r2: pd.DataFrame, n_archetypes: int = 3):
     """
-    Aproximacion practica a arquetipoides usando activos reales como extremos.
+    Archetypoid Analysis formal (ADA).
+
+    Cada activo se representa por su perfil de coherencias wavelet con el resto.
+    ADA selecciona arquetipoides reales y minimiza ||X - A B X||^2 bajo
+    restricciones convexas en A, con B restringido a observaciones reales.
     """
     assets = list(adj_r2.index)
     n_components = min(n_archetypes, len(assets))
-    dist = (1 - adj_r2).to_numpy(copy=True)
-    np.fill_diagonal(dist, 0.0)
+    X = adj_r2.to_numpy(dtype=float, copy=True)
+    np.fill_diagonal(X, 0.0)
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
-    selected = [int(np.argmax(dist.mean(axis=1)))]
-    while len(selected) < n_components:
-        min_dist = dist[:, selected].min(axis=1)
-        min_dist[selected] = -1
-        selected.append(int(np.argmax(min_dist)))
-
+    model = ADA(
+        n_components,
+        init="furthest_first",
+        n_init=5,
+        max_iter=500,
+        tol=1e-5,
+        method="nnls",
+        random_state=33,
+    )
+    alpha = model.fit_transform(X)
+    selected = model.B_.argmax(axis=1)
     archetypoids = [assets[i] for i in selected]
-    scores = 1 / (dist[:, selected] + 1e-6)
-    alpha = scores / (scores.sum(axis=1, keepdims=True) + 1e-12)
-
-    for pos, asset_idx in enumerate(selected):
-        alpha[asset_idx, :] = 0
-        alpha[asset_idx, pos] = 1
 
     alpha_df = pd.DataFrame(
         alpha,
         index=adj_r2.index,
         columns=[f"Arquetipoide {i + 1}: {name}" for i, name in enumerate(archetypoids)]
     )
+    alpha_df.attrs["rss"] = float(model.rss_)
+    alpha_df.attrs["reconstruction_error"] = float(model.reconstruction_error_)
+    alpha_df.attrs["selected_archetypoids"] = archetypoids
 
     return alpha_df
 
@@ -876,22 +923,57 @@ def compute_time_distance(data: pd.DataFrame):
 
 @st.cache_data
 def fit_biarchetype_proxy(data: pd.DataFrame, distance_matrix: pd.DataFrame, n_components: int):
-    asset_selected = select_extreme_representatives(distance_matrix, n_components)
-    asset_weights = convex_weights_from_distance(
-        distance_matrix,
-        asset_selected,
-        prefix="Biarquetipo activo",
-    )
+    """
+    Biarchetype Analysis formal sobre X = activos x tiempo.
 
-    time_distance = compute_time_distance(data)
-    time_selected = select_extreme_representatives(time_distance, n_components)
-    time_weights = convex_weights_from_distance(
-        time_distance,
-        time_selected,
-        prefix="Biarquetipo temporal",
-    )
+    BiAA minimiza ||X - A_row B_row X B_col A_col||^2 con restricciones
+    convexas en las dos dimensiones: activos y fechas.
+    """
+    del distance_matrix
 
-    return asset_weights, time_weights, time_distance
+    X_df = data.T.copy()
+    X_df = X_df.apply(lambda row: row.fillna(row.mean()), axis=1).fillna(0.0)
+    X = X_df.to_numpy(dtype=float)
+    X = (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, keepdims=True) + 1e-9)
+
+    n_row = min(n_components, X.shape[0])
+    n_col = min(n_components, X.shape[1])
+    model = BiAA(
+        (n_row, n_col),
+        init="furthest_first",
+        n_init=3,
+        max_iter=500,
+        tol=1e-5,
+        method="pgd",
+        random_state=44,
+    )
+    model.fit(X)
+
+    asset_representatives = model.B_[0].argmax(axis=1)
+    time_representatives = model.B_[1].argmax(axis=1)
+    asset_names = list(X_df.index)
+    time_names = [idx.strftime("%Y-%m") for idx in X_df.columns]
+
+    asset_weights = pd.DataFrame(
+        model.coefficients_[0],
+        index=asset_names,
+        columns=[
+            f"Biarquetipo activo {i + 1}: {asset_names[idx]}"
+            for i, idx in enumerate(asset_representatives)
+        ],
+    )
+    time_weights = pd.DataFrame(
+        model.coefficients_[1],
+        index=pd.Index(time_names, name="Fecha"),
+        columns=[
+            f"Biarquetipo temporal {i + 1}: {time_names[idx]}"
+            for i, idx in enumerate(time_representatives)
+        ],
+    )
+    asset_weights.attrs["rss"] = float(model.rss_)
+    time_weights.attrs["rss"] = float(model.rss_)
+
+    return asset_weights, time_weights, pd.DataFrame(model.archetypes_)
 
 
 def plot_biarchetype_assets(asset_weights: pd.DataFrame):
@@ -1565,6 +1647,8 @@ if active_tab == "1. Arquetipoides":
     with col2:
         st.subheader("Pesos α")
         st.dataframe(alpha_df.round(3))
+        if "rss" in alpha_df.attrs:
+            st.metric("RSS ADA", f"{alpha_df.attrs['rss']:.4f}")
 
         dominant_df = pd.DataFrame({
             "Activo": alpha_df.index,
@@ -1584,8 +1668,8 @@ if active_tab == "2. Biarquetipos":
     st.header("Biarquetipos: activos y regÃ­menes temporales")
 
     st.caption(
-        "Lectura exploratoria inspirada en biarchetype analysis: se buscan extremos "
-        "representativos en la dimension de activos y en la dimension temporal."
+        "Biarchetype Analysis formal sobre la matriz activo-tiempo de retornos: "
+        "se optimizan simultaneamente pesos convexos para activos y fechas."
     )
 
     col_assets, col_time = st.columns([1, 1])

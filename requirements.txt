@@ -8,3 +8,4 @@ scikit-learn
 openpyxl
 yfinance
 pillow
+archetypes
