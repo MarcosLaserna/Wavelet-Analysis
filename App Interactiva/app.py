@@ -889,19 +889,16 @@ def plot_archetypes(alpha_df: pd.DataFrame):
         plot_df = coords.copy()
         plot_df["Activo"] = plot_df.index
         plot_df["Dominante"] = alpha_df.idxmax(axis=1)
-        plot_df["Tipo"] = np.where(plot_df["Activo"].isin(selected), "Arquetipoide", "Activo")
 
         fig = px.scatter(
             plot_df,
             x="H1",
             y="H2",
             color="Dominante",
-            symbol="Tipo",
-            text="Activo",
             hover_name="Activo",
-            title="H-plot de arquetipoides sobre distancia wavelet",
+            title="H-plot: arquetipoides sobre distancia wavelet",
         )
-        fig.update_traces(textposition="top center", marker=dict(size=12, line=dict(width=1, color="black")))
+        fig.update_traces(marker=dict(size=10, opacity=0.82, line=dict(width=1, color="white")))
 
         if len(selected) >= 2:
             selected_coords = coords.loc[[name for name in selected if name in coords.index]].copy()
@@ -922,7 +919,33 @@ def plot_archetypes(alpha_df: pd.DataFrame):
                     hoverinfo="skip",
                 ))
 
-        fig.update_layout(height=720, xaxis_title="H1", yaxis_title="H2")
+        selected_names = [name for name in selected if name in coords.index]
+        if selected_names:
+            selected_plot = coords.loc[selected_names].copy()
+            selected_plot["Activo"] = selected_plot.index
+            fig.add_trace(go.Scatter(
+                x=selected_plot["H1"],
+                y=selected_plot["H2"],
+                mode="markers+text",
+                text=selected_plot["Activo"],
+                textposition="top center",
+                marker=dict(
+                    size=22,
+                    color="white",
+                    opacity=1.0,
+                    line=dict(width=3, color="black"),
+                ),
+                name="Arquetipoide seleccionado",
+                hovertemplate="<b>%{text}</b><br>Arquetipoide seleccionado<extra></extra>",
+            ))
+
+        fig.update_layout(
+            height=720,
+            xaxis_title="H1",
+            yaxis_title="H2",
+            legend_title_text="Grupo dominante",
+            plot_bgcolor="white",
+        )
         fig.update_yaxes(scaleanchor="x", scaleratio=1)
         return fig
 
@@ -1718,12 +1741,22 @@ if active_tab == "1. Arquetipoides":
     with col1:
         fig = plot_archetypes(alpha_df)
         st.plotly_chart(fig, width="stretch")
+        st.caption(
+            "Cada punto es un activo situado en el h-plot de distancias wavelet. "
+            "Los circulos grandes con borde negro son los arquetipoides reales "
+            "seleccionados como vertices del simplex."
+        )
 
     with col2:
-        st.subheader("Pesos α")
+        st.subheader("Pesos alpha")
         st.dataframe(alpha_df.round(3))
         if "rss" in alpha_df.attrs:
-            st.metric("RSS ADA", f"{alpha_df.attrs['rss']:.4f}")
+            st.metric("Error de reconstruccion", f"{alpha_df.attrs['rss']:.4f}")
+            st.caption(
+                "Suma de errores cuadraticos del ajuste ADA: mide cuanto se pierde "
+                "al reconstruir los puntos del h-plot con los arquetipoides seleccionados. "
+                "Menor es mejor."
+            )
 
         dominant_df = pd.DataFrame({
             "Activo": alpha_df.index,
@@ -1731,7 +1764,7 @@ if active_tab == "1. Arquetipoides":
             "Peso dominante": alpha_df.max(axis=1)
         }).sort_values("Arquetipoide dominante")
 
-        st.subheader("Clasificación arquetípica")
+        st.subheader("Clasificacion arquetipica")
         st.dataframe(dominant_df.round(3))
 
 
