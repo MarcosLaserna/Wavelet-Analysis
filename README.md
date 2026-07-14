@@ -22,6 +22,7 @@ Wavelet-Analysis/
     tests/                # Smoke test de la interfaz
   Datos/
     datos_final.xlsx      # Dataset principal usado por la app
+    README.md             # Descripcion de datos historicos y complementarios
   Reuniones/              # Material de reuniones
   Referencias/            # Bibliografia y material metodologico
 ```
@@ -84,6 +85,9 @@ La aplicacion:
 8. Calcula arquetipoides sobre las coordenadas del h-plot.
 9. Calcula biarquetipos sobre la matriz activo-tiempo de retornos.
 10. Genera clustering, matrices, red de activos, series y exportables.
+
+La carpeta `Datos/` conserva tambien los datasets historicos y complementarios
+utilizados durante el desarrollo del proyecto.
 
 ## Prueba rapida
 
