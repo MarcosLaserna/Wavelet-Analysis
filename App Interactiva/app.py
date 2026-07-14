@@ -478,6 +478,47 @@ def compute_distance_matrix(adj_r2: pd.DataFrame):
     )
 
 
+def compute_hplot_coordinates(distance_matrix: pd.DataFrame):
+    """
+    Principal Coordinates Analysis sobre la matriz de distancias.
+
+    Es el h-plot usado como espacio geometrico bidimensional: primero se
+    transforma la distancia wavelet en coordenadas H1/H2 y despues los
+    arquetipoides se calculan sobre esas coordenadas, no sobre adj_R2 crudo.
+    """
+    assets = distance_matrix.index
+    D = distance_matrix.to_numpy(dtype=float, copy=True)
+    D = np.nan_to_num(D, nan=0.0, posinf=0.0, neginf=0.0)
+    D = (D + D.T) / 2
+    D[D < 0] = 0.0
+    np.fill_diagonal(D, 0.0)
+
+    n = D.shape[0]
+    if n == 0:
+        return pd.DataFrame(columns=["H1", "H2"], index=assets)
+    if n == 1:
+        return pd.DataFrame([[0.0, 0.0]], index=assets, columns=["H1", "H2"])
+
+    J = np.eye(n) - np.ones((n, n)) / n
+    gram = -0.5 * J @ (D ** 2) @ J
+    gram = (gram + gram.T) / 2
+
+    eigenvalues, eigenvectors = np.linalg.eigh(gram)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+
+    coords = np.zeros((n, 2))
+    for dim in range(min(2, n)):
+        value = max(float(eigenvalues[dim]), 0.0)
+        coords[:, dim] = eigenvectors[:, dim] * np.sqrt(value)
+        pivot = int(np.argmax(np.abs(coords[:, dim])))
+        if coords[pivot, dim] < 0:
+            coords[:, dim] *= -1
+
+    return pd.DataFrame(coords, index=assets, columns=["H1", "H2"])
+
+
 # ============================================================
 # RED DE INTERDEPENDENCIA
 # ============================================================
@@ -800,18 +841,19 @@ def plot_wavelet_network(adj_r2: pd.DataFrame, threshold: float = 0.42):
 # ARQUETIPOIDES
 # ============================================================
 
-def fit_archetype_proxy(adj_r2: pd.DataFrame, n_archetypes: int = 3):
+def fit_archetype_proxy(hplot_coordinates: pd.DataFrame, n_archetypes: int = 3):
     """
-    Archetypoid Analysis formal (ADA).
+    Archetypoid Analysis formal (ADA) sobre el h-plot.
 
-    Cada activo se representa por su perfil de coherencias wavelet con el resto.
-    ADA selecciona arquetipoides reales y minimiza ||X - A B X||^2 bajo
-    restricciones convexas en A, con B restringido a observaciones reales.
+    Cada activo se representa por sus coordenadas H1/H2 obtenidas desde la
+    matriz de distancias wavelet. ADA selecciona arquetipoides reales y
+    minimiza ||X - A B X||^2 bajo restricciones convexas en A, con B
+    restringido a observaciones reales.
     """
-    assets = list(adj_r2.index)
+    assets = list(hplot_coordinates.index)
     n_components = min(n_archetypes, len(assets))
-    X = adj_r2.to_numpy(dtype=float, copy=True)
-    np.fill_diagonal(X, 0.0)
+    X_df = hplot_coordinates[["H1", "H2"]].copy()
+    X = X_df.to_numpy(dtype=float, copy=True)
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
     model = ADA(
@@ -829,17 +871,61 @@ def fit_archetype_proxy(adj_r2: pd.DataFrame, n_archetypes: int = 3):
 
     alpha_df = pd.DataFrame(
         alpha,
-        index=adj_r2.index,
+        index=hplot_coordinates.index,
         columns=[f"Arquetipoide {i + 1}: {name}" for i, name in enumerate(archetypoids)]
     )
     alpha_df.attrs["rss"] = float(model.rss_)
     alpha_df.attrs["reconstruction_error"] = float(model.reconstruction_error_)
     alpha_df.attrs["selected_archetypoids"] = archetypoids
+    alpha_df.attrs["hplot_coordinates"] = X_df
 
     return alpha_df
 
 
 def plot_archetypes(alpha_df: pd.DataFrame):
+    coords = alpha_df.attrs.get("hplot_coordinates")
+    if isinstance(coords, pd.DataFrame) and {"H1", "H2"}.issubset(coords.columns):
+        selected = alpha_df.attrs.get("selected_archetypoids", [])
+        plot_df = coords.copy()
+        plot_df["Activo"] = plot_df.index
+        plot_df["Dominante"] = alpha_df.idxmax(axis=1)
+        plot_df["Tipo"] = np.where(plot_df["Activo"].isin(selected), "Arquetipoide", "Activo")
+
+        fig = px.scatter(
+            plot_df,
+            x="H1",
+            y="H2",
+            color="Dominante",
+            symbol="Tipo",
+            text="Activo",
+            hover_name="Activo",
+            title="H-plot de arquetipoides sobre distancia wavelet",
+        )
+        fig.update_traces(textposition="top center", marker=dict(size=12, line=dict(width=1, color="black")))
+
+        if len(selected) >= 2:
+            selected_coords = coords.loc[[name for name in selected if name in coords.index]].copy()
+            if len(selected_coords) >= 2:
+                center = selected_coords[["H1", "H2"]].mean()
+                angles = np.arctan2(
+                    selected_coords["H2"] - center["H2"],
+                    selected_coords["H1"] - center["H1"],
+                )
+                selected_coords = selected_coords.iloc[np.argsort(angles.to_numpy())]
+                closed = pd.concat([selected_coords, selected_coords.iloc[[0]]]) if len(selected_coords) > 2 else selected_coords
+                fig.add_trace(go.Scatter(
+                    x=closed["H1"],
+                    y=closed["H2"],
+                    mode="lines",
+                    line=dict(color="rgba(30,30,30,0.55)", width=2, dash="dash"),
+                    name="Simplex",
+                    hoverinfo="skip",
+                ))
+
+        fig.update_layout(height=720, xaxis_title="H1", yaxis_title="H2")
+        fig.update_yaxes(scaleanchor="x", scaleratio=1)
+        return fig
+
     plot_df = alpha_df.copy()
     plot_df["Activo"] = plot_df.index
     plot_df["Dominante"] = alpha_df.idxmax(axis=1)
@@ -1262,19 +1348,7 @@ def build_graphics_zip_bytes(
         exported = image_bytes(image)
     graphics["02_matriz_coherencia_adj_R2.png"] = exported
 
-    long_alpha = (
-        alpha_df.reset_index(names="Activo")
-        .melt(id_vars="Activo", var_name="Arquetipoide", value_name="Peso")
-    )
-    fig_archetypes = px.bar(
-        long_alpha,
-        x="Activo",
-        y="Peso",
-        color="Arquetipoide",
-        barmode="stack",
-        title="Composicion por arquetipoides",
-    )
-    fig_archetypes.update_layout(height=800, xaxis_tickangle=-60)
+    fig_archetypes = plot_archetypes(alpha_df)
     exported = plotly_png_bytes(fig_archetypes, width=2200, height=1600, scale=2)
     if exported is None:
         image = Image.new("RGB", (2200, 1600), "white")
@@ -1544,6 +1618,7 @@ if needs_calculation:
 
 adj_r2 = st.session_state["adj_r2"]
 distance_matrix = compute_distance_matrix(adj_r2)
+hplot_coordinates = compute_hplot_coordinates(distance_matrix)
 
 
 TAB_LABELS = [
@@ -1567,7 +1642,7 @@ active_tab = st.radio(
     label_visibility="collapsed",
 )
 
-alpha_df = fit_archetype_proxy(adj_r2, n_archetypes=n_archetypes)
+alpha_df = fit_archetype_proxy(hplot_coordinates, n_archetypes=n_archetypes)
 
 if auto_k:
     best_k, scores_df = choose_best_k_silhouette(distance_matrix, max_k=max_k)
@@ -1636,7 +1711,7 @@ if "graphics_zip" in st.session_state:
 if active_tab == "1. Arquetipoides":
     st.header("Grafico dinamico de arquetipoides")
 
-    alpha_df = fit_archetype_proxy(adj_r2, n_archetypes=n_archetypes)
+    alpha_df = fit_archetype_proxy(hplot_coordinates, n_archetypes=n_archetypes)
 
     col1, col2 = st.columns([2, 1])
 
@@ -1852,6 +1927,7 @@ if active_tab == "7. Exportar":
         "retornos_log": data,
         "coherencia_adj_R2": adj_r2,
         "distancia_wavelet": distance_matrix,
+        "hplot_coordenadas": hplot_coordinates,
         "pesos_arquetipoides": alpha_df,
         "biarquetipos_activos": bi_asset_weights,
         "biarquetipos_temporales": bi_time_weights,
