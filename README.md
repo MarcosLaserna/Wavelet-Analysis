@@ -23,7 +23,7 @@ Wavelet-Analysis/
   Datos/
     datos_final.xlsx      # Dataset principal usado por la app
     README.md             # Descripcion de datos historicos y complementarios
-  Reuniones/              # Material de reuniones
+  Reuniones/              # Material de reuniones, incluida Ultima Reunion.pdf
   Referencias/            # Bibliografia y material metodologico
 ```
 
