@@ -1,68 +1,96 @@
-# Wavelet Analysis Research Workspace
+# Wavelet Analysis
 
-Repositorio de trabajo para el analisis de coherencia wavelet, arquetipos y
-clustering aplicado a indices de energia, activos verdes y bonos.
+Aplicacion Streamlit para analisis financiero con coherencia wavelet,
+arquetipoides, biarquetipos, clustering, redes de activos y exportacion de
+graficos/resultados.
 
-## Estructura
+## Enlaces
+
+- Repositorio GitHub: https://github.com/MarcosLaserna/Wavelet-Analysis
+- App desplegada en Streamlit Cloud: https://wavelet-analysis.streamlit.app/
+
+## Estructura principal
 
 ```text
-Investigacion/
-  App.bat                 # Lanzador local de la app en Windows
-  App Interactiva/        # Aplicacion Streamlit, tests y scripts
-  Datos/                  # Excels y CSV de entrada
-  Reuniones/              # PDFs preparados para reuniones
+Wavelet-Analysis/
+  streamlit_app.py        # Punto de entrada para Streamlit Cloud
+  requirements.txt        # Dependencias Python
+  runtime.txt             # Version de Python recomendada en Cloud
+  App.bat                 # Lanzador local en Windows
+  App Interactiva/
+    app.py                # Aplicacion principal
+    tests/                # Smoke test de la interfaz
+  Datos/
+    datos_final.xlsx      # Dataset principal usado por la app
+  Reuniones/              # Material de reuniones
   Referencias/            # Bibliografia y material metodologico
 ```
 
-## Ejecutar la app
+## Ejecutar en local
 
-En Windows, desde la carpeta principal, haz doble clic en:
+En Windows, desde la carpeta principal, se puede abrir la app con doble clic en:
 
 ```text
 App.bat
 ```
 
-El lanzador abre `http://localhost:8501`, usa un entorno virtual local si esta
-disponible y, si hace falta, instala las dependencias de `requirements.txt`.
-
-Tambien se puede ejecutar manualmente:
+O manualmente:
 
 ```powershell
 cd "App Interactiva"
-.venv\Scripts\streamlit.exe run app.py
+.venv\Scripts\python.exe -m streamlit run app.py --server.port 8501
 ```
+
+La app se abre en:
+
+```text
+http://localhost:8501
+```
+
+## Desplegar en Streamlit Cloud
+
+1. Entrar en https://share.streamlit.io/
+2. Elegir **New app**.
+3. Seleccionar el repositorio:
+
+```text
+MarcosLaserna/Wavelet-Analysis
+```
+
+4. Usar estos parametros:
+
+```text
+Branch: main
+Main file path: streamlit_app.py
+Python version: definida en runtime.txt
+```
+
+5. Pulsar **Deploy**.
+
+Importante: el archivo principal para Cloud es `streamlit_app.py`, no
+`App Interactiva/app.py`. Esto evita problemas con espacios en la ruta.
 
 ## Flujo analitico
 
-La app:
+La aplicacion:
 
-1. Carga los Excel desde `Datos/`.
-2. Homogeneiza las fechas a frecuencia mensual.
+1. Carga `Datos/datos_final.xlsx`.
+2. Homogeneiza precios a frecuencia mensual.
 3. Calcula retornos logaritmicos.
-4. Estandariza las series.
-5. Calcula la matriz de coherencia wavelet media `adj_R2`.
-6. Deriva una distancia `1 - adj_R2`.
-7. Visualiza arquetipos, K-Means, matrices, series y exportables.
+4. Calcula la coherencia wavelet media entre pares de activos.
+5. Construye la matriz `adj_R2`.
+6. Deriva la distancia `1 - adj_R2`.
+7. Proyecta la distancia a un h-plot bidimensional mediante PCoA.
+8. Calcula arquetipoides sobre las coordenadas del h-plot.
+9. Calcula biarquetipos sobre la matriz activo-tiempo de retornos.
+10. Genera clustering, matrices, red de activos, series y exportables.
 
-La matriz de coherencia se calcula automaticamente al arrancar la app con los
-datos y parametros disponibles.
-
-## Prueba de interfaz
+## Prueba rapida
 
 ```powershell
 cd "App Interactiva"
 .venv\Scripts\python.exe tests\smoke_streamlit_app.py
 ```
 
-La prueba valida carga de datos, calculo automatico, pestañas principales,
-metricas y tablas.
-
-## Presentaciones
-
-Los PDFs de reuniones estan en `Reuniones/`. La presentacion mas reciente es:
-
-```text
-Reuniones/Quinta Reunion.pdf
-```
-
-Los scripts para regenerar presentaciones estan en `App Interactiva/scripts/`.
+La prueba comprueba que la app carga los datos, calcula resultados iniciales y
+renderiza las vistas principales sin errores.
