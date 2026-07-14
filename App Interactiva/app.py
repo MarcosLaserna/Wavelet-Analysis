@@ -275,10 +275,6 @@ def read_final_dataset(path):
 def build_dataset(data_dir: str, bond_sheet: str):
     data_dir = Path(data_dir)
 
-    final_path = data_dir / "datos_final.xlsx"
-    if final_path.exists():
-        return read_final_dataset(final_path)
-
     files = {
         "CSI_China": data_dir / "CSI_New_Energy_index.xlsx",
         "Wind": data_dir / "ISE_Clean_Edge_Global_Wind_Energy_index.xlsx",
@@ -288,33 +284,53 @@ def build_dataset(data_dir: str, bond_sheet: str):
         "Bonds": data_dir / "eurostat_bonos10.xlsx",
     }
 
-    missing = [str(v) for v in files.values() if not v.exists()]
-    if missing:
-        raise FileNotFoundError(
-            "Faltan estos archivos en la carpeta indicada:\n" + "\n".join(missing)
-        )
-
     series = []
+    missing = []
 
-    series.append(read_market_index_excel(files["CSI_China"], "CSI_China"))
-    series.append(read_market_index_excel(files["Wind"], "Wind"))
-    series.append(read_market_index_excel(files["SP_Clean"], "SP_Clean"))
-    series.append(read_market_index_excel(files["WilderHill"], "WilderHill"))
+    final_path = data_dir / "datos_final.xlsx"
+    if final_path.exists():
+        series.append(read_final_dataset(final_path))
+    else:
+        missing.append(str(final_path))
 
-    series.append(read_hui_sheet(files["Hui"], "SUNIDX", "Solar"))
-    series.append(read_hui_sheet(files["Hui"], "MVIS GLO URAN PR", "Uranium"))
-    series.append(read_hui_sheet(files["Hui"], "FTSE ENV OPPORT ENE EFF", "FTSE_Env"))
-    series.append(read_hui_sheet(files["Hui"], "ERIXP USD", "ERIXP_EU"))
+    market_readers = [
+        ("CSI_China", lambda path: read_market_index_excel(path, "CSI_China")),
+        ("Wind", lambda path: read_market_index_excel(path, "Wind")),
+        ("SP_Clean", lambda path: read_market_index_excel(path, "SP_Clean")),
+        ("WilderHill", lambda path: read_market_index_excel(path, "WilderHill")),
+        ("Hui", lambda path: read_hui_sheet(path, "SUNIDX", "Solar")),
+        ("Hui", lambda path: read_hui_sheet(path, "MVIS GLO URAN PR", "Uranium")),
+        ("Hui", lambda path: read_hui_sheet(path, "FTSE ENV OPPORT ENE EFF", "FTSE_Env")),
+        ("Hui", lambda path: read_hui_sheet(path, "ERIXP USD", "ERIXP_EU")),
+    ]
 
-    bonds = read_eurostat_bonds(files["Bonds"], sheet_name=bond_sheet)
-    series.append(bonds)
+    for key, reader in market_readers:
+        path = files[key]
+        if path.exists():
+            series.append(reader(path))
+        elif str(path) not in missing:
+            missing.append(str(path))
+
+    if files["Bonds"].exists():
+        series.append(read_eurostat_bonds(files["Bonds"], sheet_name=bond_sheet))
+    else:
+        missing.append(str(files["Bonds"]))
 
     yahoo_path = data_dir / "Yahoo_Assets.xlsx"
     if yahoo_path.exists():
         yahoo_returns, _ = read_yahoo_assets(yahoo_path)
         series.append(yahoo_returns)
+    else:
+        missing.append(str(yahoo_path))
+
+    if not series:
+        raise FileNotFoundError(
+            "Faltan estos archivos en la carpeta indicada:\n" + "\n".join(missing)
+        )
 
     dataset = pd.concat(series, axis=1, join="outer")
+    if dataset.columns.duplicated().any():
+        dataset = dataset.T.groupby(level=0).first().T
     dataset = dataset.sort_index()
     dataset = dataset.dropna(axis=0, how="all")
     dataset = dataset.loc[:, dataset.std(skipna=True) > 0]
