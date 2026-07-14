@@ -75,16 +75,18 @@ Importante: el archivo principal para Cloud es `streamlit_app.py`, no
 
 La aplicacion:
 
-1. Carga `Datos/datos_final.xlsx`.
-2. Homogeneiza precios a frecuencia mensual.
-3. Calcula retornos logaritmicos.
-4. Calcula la coherencia wavelet media entre pares de activos.
-5. Construye la matriz `adj_R2`.
-6. Deriva la distancia `1 - adj_R2`.
-7. Proyecta la distancia a un h-plot bidimensional mediante PCoA.
-8. Calcula arquetipoides sobre las coordenadas del h-plot.
-9. Calcula biarquetipos sobre la matriz activo-tiempo de retornos.
-10. Genera clustering, matrices, red de activos, series y exportables.
+1. Carga y combina los datasets disponibles en `Datos/`.
+2. Usa `datos_final.xlsx` como base principal y conserva los datos historicos
+   y complementarios del proyecto.
+3. Homogeneiza precios a frecuencia mensual.
+4. Calcula retornos logaritmicos.
+5. Calcula la coherencia wavelet media entre pares de activos.
+6. Construye la matriz `adj_R2`.
+7. Deriva la distancia `1 - adj_R2`.
+8. Proyecta la distancia a un h-plot bidimensional mediante PCoA.
+9. Calcula arquetipoides sobre las coordenadas del h-plot.
+10. Calcula biarquetipos sobre la matriz activo-tiempo de retornos.
+11. Genera clustering, matrices, red de activos, series y exportables.
 
 La carpeta `Datos/` conserva tambien los datasets historicos y complementarios
 utilizados durante el desarrollo del proyecto.
